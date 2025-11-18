@@ -412,29 +412,7 @@ class CardPredictor:
     #                    CRÉATION / ENREGISTREMENT PRÉDICTION
     # ================================================================
 
-    def make_prediction(self, game_number: int, confidence: int) -> str:
-        """
-        Enregistre la prédiction pour game_number+2 avec la confiance.
-        Retourne le texte du message à poster.
-        """
-        target_game = game_number + 2
-        message_text = f"🔵{target_game}🔵 : Valeur Q statut : ⏳ ({confidence}%)"
-
-        # Stocker en tant que clé str pour JSON convivial
-        key = str(target_game)
-        self.predictions[key] = {
-            "predicted_costume": "Q",
-            "status": "pending",
-            "predicted_from": game_number,
-            "verification_count": 0,
-            "message_text": message_text,
-            "message_id": None,
-            "confidence": int(confidence),
-            "created_at": datetime.now().isoformat(),
-        }
-        self._save_all()
-        logger.info(f\"💾 Prédiction créée pour {target_game} (depuis {game_number}) conf {confidence}%\")
-        return message_text
+    
 
     # ================================================================
     #                    VÉRIFICATION DES PRÉDICTIONS
@@ -448,64 +426,123 @@ class CardPredictor:
         """
         # Ne rien faire si message non finalisé
         if not self.is_finalized(text):
+         # ================================================================
+    #                    CRÉATION / ENREGISTREMENT PRÉDICTION
+    # ================================================================
+
+    def make_prediction(self, game_number: int, confidence: int) -> str:
+        """
+        Enregistre la prédiction pour game_number+2 avec la confiance.
+        Retourne le texte du message à poster.
+        """
+        target_game = game_number + 2
+        message_text = f"🔵{target_game}🔵:Valeur Q statut :⏳ ({confidence}%)"
+
+        key = str(target_game)
+        self.predictions[key] = {
+            "predicted_costume": "Q",
+            "status": "pending",
+            "predicted_from": game_number,
+            "verification_count": 0,
+            "message_text": message_text,
+            "message_id": None,
+            "confidence": int(confidence),
+            "created_at": datetime.now().isoformat(),
+        }
+
+        self._save_all()
+
+        # 🔧 LIGNE CORRIGÉE : aucun caractère d’échappement inutile
+        logger.info(
+            f"💾 Prédiction créée pour {target_game} (depuis {game_number}) conf {confidence}%"
+        )
+
+        return message_text
+
+    # ================================================================
+    #                    VÉRIFICATION DES PRÉDICTIONS
+    # ================================================================
+
+    def _verify_prediction_common(self, text: str, is_edited: bool = False) -> Optional[Dict]:
+        """
+        Vérifie si le message FINALISÉ correspond à une prédiction Q en attente.
+        Retourne un dict:
+            { 'type': 'edit_message', 'predicted_game': X, 'new_message': '...' }
+        """
+        # Ne rien faire si message NON FINALISÉ
+        if not self.is_finalized(text):
             return None
 
         game_number = self.extract_game_number(text)
         if not game_number:
             return None
 
-        # Parcourir prédictions en attente
         keys = list(self.predictions.keys())
         for k in keys:
-            try:
-                predicted_game = int(k)
-            except ValueError:
-                continue
-            prediction = self.predictions.get(str(predicted_game))
+            predicted_game = int(k)
+            prediction = self.predictions.get(k)
+
             if not prediction:
                 continue
 
-            if prediction.get("status") != "pending" or prediction.get("predicted_costume") != "Q":
+            if prediction.get("status") != "pending":
                 continue
 
-            verification_offset = game_number - predicted_game  # 0..2 expected
-            if 0 <= verification_offset <= 2:
-                q_found = self.has_Q_in_group1(text)
-                confidence = prediction.get("confidence", None) or 0
+            if prediction.get("predicted_costume") != "Q":
+                continue
 
-                status_symbol_map = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}
-                if q_found:
-                    status_symbol = status_symbol_map.get(verification_offset, "✅")
-                    updated_message = f\"🔵{predicted_game}🔵:Valeur Q statut :{status_symbol} ({confidence}%)\"
+            # offset = jeu du message - jeu prédit
+            offset = game_number - predicted_game
+            if offset < 0 or offset > 2:
+                continue
 
-                    prediction["status"] = f\"correct_offset_{verification_offset}\"
-                    prediction["verification_count"] = verification_offset
-                    prediction["final_message"] = updated_message
-                    prediction["finalized_at"] = datetime.now().isoformat()
-                    self._save_all()
+            q_found = self.has_Q_in_group1(text)
+            confidence = prediction.get("confidence", 0)
 
-                    logger.info(f\"🔍 ✅ SUCCÈS OFFSET +{verification_offset} - Dame trouvée au jeu {game_number} (pred {predicted_game})\")
-                    return {
-                        "type": "edit_message",
-                        "predicted_game": predicted_game,
-                        "new_message": updated_message,
-                    }
-                else:
-                    # Si on est à offset 2 et toujours rien => échec
-                    if verification_offset == 2:
-                        updated_message = f\"🔵{predicted_game}🔵:Valeur Q statut :❌ ({confidence}%)\"
-                        prediction["status"] = "failed"
-                        prediction["final_message"] = updated_message
-                        prediction["finalized_at"] = datetime.now().isoformat()
-                        self._save_all()
-                        logger.info(f\"🔍 ❌ ÉCHEC OFFSET +2 - Rien trouvé pour prédiction {predicted_game}\")
-                        return {
-                            "type": "edit_message",
-                            "predicted_game": predicted_game,
-                            "new_message": updated_message,
-                        }
+            status_map = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}
+
+            # ---- SUCCÈS ----
+            if q_found:
+                symbol = status_map.get(offset, "✅")
+                updated = f"🔵{predicted_game}🔵:Valeur Q statut :{symbol} ({confidence}%)"
+
+                prediction["status"] = f"correct_offset_{offset}"
+                prediction["verification_count"] = offset
+                prediction["final_message"] = updated
+                prediction["finalized_at"] = datetime.now().isoformat()
+                self._save_all()
+
+                logger.info(
+                    f"🔍 SUCCÈS +{offset} – Q trouvée au jeu {game_number} (Prédiction {predicted_game})"
+                )
+
+                return {
+                    "type": "edit_message",
+                    "predicted_game": predicted_game,
+                    "new_message": updated,
+                }
+
+            # ---- ÉCHEC OFFSET +2 ----
+            if offset == 2 and not q_found:
+                updated = f"🔵{predicted_game}🔵:Valeur Q statut :❌ ({confidence}%)"
+
+                prediction["status"] = "failed"
+                prediction["final_message"] = updated
+                prediction["finalized_at"] = datetime.now().isoformat()
+                self._save_all()
+
+                logger.info(
+                    f"🔍 ÉCHEC +2 – aucune Dame trouvée (Prédiction {predicted_game})"
+                )
+
+                return {
+                    "type": "edit_message",
+                    "predicted_game": predicted_game,
+                    "new_message": updated,
+                }
+
         return None
 
     # ================================================================
-    #                         FIN DE LA CLASSE
+    #                         FIN DU FICHIER
     # ================================================================
