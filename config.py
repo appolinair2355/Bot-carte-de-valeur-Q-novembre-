@@ -89,5 +89,4 @@ class Config:
             f"Config(webhook_url={self.WEBHOOK_URL}, "
             f"port={self.PORT}, "
             f"debug={self.DEBUG})"
-    )
-            
+        )
