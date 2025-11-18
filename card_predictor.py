@@ -418,7 +418,7 @@ class CardPredictor:
         Retourne le texte du message à poster.
         """
         target_game = game_number + 2
-        message_text = f\"🔵{target_game}🔵:Valeur Q statut :⏳ ({confidence}%)\"
+        message_text = f"🔵{target_game}🔵 : Valeur Q statut : ⏳ ({confidence}%)"
 
         # Stocker en tant que clé str pour JSON convivial
         key = str(target_game)
