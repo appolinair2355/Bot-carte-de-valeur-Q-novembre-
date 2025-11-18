@@ -1,4 +1,4 @@
-config.py
+# config.py
 
 """
 Configuration settings for the Telegram bot
