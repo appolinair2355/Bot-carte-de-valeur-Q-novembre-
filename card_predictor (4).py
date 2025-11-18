@@ -1,539 +1,511 @@
-# card_predictor.py
+# -*- coding: utf-8 -*-
+"""
+Card Predictor – Version Complète Mise à Jour
 
+Fonctionnalités principales :
+- Règles statiques 2.1 → 2.6 intégrées avec niveau de confiance
+- Le bot n’analyse les messages QUE lorsqu’ils sont finalisés (✅ ou 🔰)
+- La confiance (%) apparaît dans les prédictions et dans les mises à jour
+- Mode intelligent INTER conservé
+- Apprentissage N-2 → N (Q)
+- Vérification offset 0/1/2 avec émoji + confiance
 """
-Card prediction logic for Joker's Telegram Bot - simplified for webhook deployment
-"""
+
 import re
-import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple, Any
-import time
-import os
 import json
+import time
+import logging
+from datetime import datetime
+from typing import Optional, Dict, List, Tuple, Any
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# --- CONSTANTES ---
-HIGH_VALUE_CARDS = ["A", "K", "Q", "J"] 
-CARD_SYMBOLS = [r"♠️", r"♥️", r"♦️", r"♣️", r"❤️"] # Inclure les deux variantes pour le pattern regex
+# -----------------------------
+# CONSTANTES
+# -----------------------------
+HIGH_VALUE_CARDS = ["A", "K", "Q", "J"]
+
+CARD_SYMBOLS = [r"♠️", r"♥️", r"♦️", r"♣️", r"❤️"]
+
+CONFIDENCE_RULES = {
+    "2.1": 98,   # Valet solitaire
+    "2.2": 57,   # Deux Valets
+    "2.3": 97,   # Total de points élevé (>=45)
+    "2.4": 60,   # Manque consécutif de Q
+    "2.5": 70,   # Combinaison 8-9-10
+    "2.6": 70,   # Bloc final (K+J, Tag O/R, Double faiblesse)
+}
+
+
+# ================================================================
+#                       CLASSE PRINCIPALE
+# ================================================================
 
 class CardPredictor:
-    """Gère la logique de prédiction de carte Dame (Q) et la vérification."""
+    """Gestion complète de la prédiction Q."""
 
     def __init__(self):
-        # Données de persistance (Prédictions et messages)
-        self.predictions = self._load_data('predictions.json') 
-        self.processed_messages = self._load_data('processed.json', is_set=True) 
-        self.last_prediction_time = self._load_data('last_prediction_time.json', is_scalar=True)
-        
-        # Configuration dynamique des canaux
-        self.config_data = self._load_data('channels_config.json')
-        self.target_channel_id = self.config_data.get('target_channel_id', None)
-        self.prediction_channel_id = self.config_data.get('prediction_channel_id', None)
-        
-        # --- Logique INTER (N-2 -> Q à N) ---
-        # Stocke les cartes de tous les jeux, en attendant que Q arrive à N pour relier à N-2
-        self.sequential_history: Dict[int, Dict] = self._load_data('sequential_history.json') 
-        # Données officielles des déclencheurs
-        self.inter_data: List[Dict] = self._load_data('inter_data.json') 
-        
-        # Statut et Règles
-        self.is_inter_mode_active = self._load_data('inter_mode_status.json', is_scalar=True)
-        self.smart_rules = self._load_data('smart_rules.json') # Stocke les Top 3 actifs
-        self.prediction_cooldown = 30 
-        
+        # --------- Stockage local JSON ---------
+        self.predictions: Dict = self._load_data("predictions.json")
+        self.processed_messages: set = self._load_data("processed.json", is_set=True)
+        self.last_prediction_time: float = self._load_data("last_prediction_time.json", is_scalar=True)
+
+        # --------- Configuration canaux ---------
+        self.config_data = self._load_data("channels_config.json")
+        self.target_channel_id = self.config_data.get("target_channel_id")
+        self.prediction_channel_id = self.config_data.get("prediction_channel_id")
+
+        # --------- Mode INTER / Historique ---------
+        self.sequential_history: Dict[int, Dict] = self._load_data("sequential_history.json")
+        self.inter_data: List[Dict] = self._load_data("inter_data.json")
+        self.is_inter_mode_active = self._load_data("inter_mode_status.json", is_scalar=True)
+        self.smart_rules: List[Dict] = self._load_data("smart_rules.json")
+
+        self.prediction_cooldown = 30  # anti-spam
+
         if self.inter_data and not self.is_inter_mode_active:
-             self.analyze_and_set_smart_rules(initial_load=True) # Analyse à l'initialisation si l'historique existe
+            self.analyze_and_set_smart_rules(initial_load=True)
 
-    # --- Persistance des Données (JSON) ---
-    def _load_data(self, filename: str, is_set: bool = False, is_scalar: bool = False) -> Any:
-        """Charge les données depuis un fichier JSON."""
+    # ================================================================
+    #                        JSON PERSISTENCE
+    # ================================================================
+
+    def _load_data(self, filename: str, is_set=False, is_scalar=False):
         try:
-            with open(filename, 'r') as f:
+            with open(filename, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if is_set:
-                    return set(data)
-                if is_scalar:
-                    if filename == 'inter_mode_status.json':
-                        return data.get('active', False)
-                    return int(data) if isinstance(data, (int, float)) else data
-                
-                # Gestion des types
-                if filename == 'inter_data.json': return data
-                if filename == 'sequential_history.json': 
-                    # Convertir les clés string en int si elles représentent le numéro de jeu
-                    return {int(k): v for k, v in data.items()}
-                if filename == 'smart_rules.json': return data
-                
-                return data
+
+            if is_set:
+                return set(data)
+
+            if is_scalar:
+                if filename == "inter_mode_status.json":
+                    return data.get("active", False)
+                return float(data)
+
+            if filename == "sequential_history.json":
+                return {int(k): v for k, v in data.items()}
+
+            return data
+
         except (FileNotFoundError, json.JSONDecodeError):
-            logger.warning(f"⚠️ Fichier {filename} non trouvé ou vide. Initialisation par défaut.")
-            if is_set: return set()
-            if is_scalar and filename == 'inter_mode_status.json': return False
-            if is_scalar: return 0.0
-            if filename == 'inter_data.json': return []
-            if filename == 'sequential_history.json': return {}
-            if filename == 'smart_rules.json': return []
+            if is_set:
+                return set()
+            if is_scalar:
+                return 0
+            if filename == "inter_data.json":
+                return []
+            if filename == "sequential_history.json":
+                return {}
             return {}
-        except Exception as e:
-             logger.error(f"❌ Erreur critique de chargement de {filename}: {e}")
-             return set() if is_set else (False if filename == 'inter_mode_status.json' else ([] if filename == 'inter_data.json' else {}))
 
-    def _save_data(self, data: Any, filename: str):
-        """Sauvegarde les données dans un fichier JSON."""
-        if filename == 'inter_mode_status.json':
-            data_to_save = {'active': self.is_inter_mode_active}
-        elif isinstance(data, set):
-            data_to_save = list(data)
-        else:
-            data_to_save = data
-            
-        try:
-            with open(filename, 'w') as f:
-                json.dump(data_to_save, f, indent=4)
-        except Exception as e:
-            logger.error(f"❌ Erreur critique de sauvegarde de {filename}: {e}. Problème de permissions ou de disque.")
+    def _save_data(self, data, filename: str):
+        if filename == "inter_mode_status.json":
+            data = {"active": self.is_inter_mode_active}
 
-    def _save_all_data(self):
-        """Sauvegarde tous les états persistants."""
-        self._save_data(self.predictions, 'predictions.json')
-        self._save_data(self.processed_messages, 'processed.json')
-        self._save_data(self.last_prediction_time, 'last_prediction_time.json')
-        self._save_data(self.inter_data, 'inter_data.json')
-        self._save_data(self.sequential_history, 'sequential_history.json')
-        self._save_data(self.is_inter_mode_active, 'inter_mode_status.json')
-        self._save_data(self.smart_rules, 'smart_rules.json')
+        if isinstance(data, set):
+            data = list(data)
 
-    def _save_channels_config(self):
-        """Sauvegarde les IDs de canaux dans channels_config.json."""
-        self.config_data['target_channel_id'] = self.target_channel_id
-        self.config_data['prediction_channel_id'] = self.prediction_channel_id
-        self._save_data(self.config_data, 'channels_config.json')
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
 
-    def set_channel_id(self, channel_id: int, channel_type: str):
-        """Met à jour les IDs de canal et sauvegarde."""
-        if channel_type == 'source':
-            self.target_channel_id = channel_id
-            logger.info(f"💾 Canal SOURCE mis à jour: {channel_id}")
-        elif channel_type == 'prediction':
-            self.prediction_channel_id = channel_id
-            logger.info(f"💾 Canal PRÉDICTION mis à jour: {channel_id}")
-        else:
-            return False
-            
-        self._save_channels_config()
-        return True
+    def _save_all(self):
+        self._save_data(self.predictions, "predictions.json")
+        self._save_data(self.processed_messages, "processed.json")
+        self._save_data(self.last_prediction_time, "last_prediction_time.json")
+        self._save_data(self.inter_data, "inter_data.json")
+        self._save_data(self.sequential_history, "sequential_history.json")
+        self._save_data(self.smart_rules, "smart_rules.json")
+        self._save_data(self.is_inter_mode_active, "inter_mode_status.json")
 
-    # --- Logique d'Extraction (Mise à jour pour #N et #n) ---
+    # ================================================================
+    #                           EXTRACTION
+    # ================================================================
+
     def extract_game_number(self, message: str) -> Optional[int]:
-        """Extrait le numéro du jeu, reconnaissant #N et #n."""
-        
-        # Recherche #N ou #n en ignorant la casse (re.IGNORECASE)
-        match = re.search(r'#N(\d+)\.', message, re.IGNORECASE) 
-        
+        match = re.search(r"#N(\d+)\.", message, re.IGNORECASE)
         if not match:
-            # Recherche le format de prédiction (🔵N🔵)
-            match = re.search(r'🔵(\d+)🔵', message)
-            
+            match = re.search(r"🔵(\d+)🔵", message)
         if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                return None
+            return int(match.group(1))
         return None
 
-    def extract_first_parentheses_content(self, message: str) -> Optional[str]:
-        """Extrait le contenu de la première parenthèse."""
-        pattern = r'\(([^)]*)\)' 
-        match = re.search(pattern, message)
-        if match:
-            return match.group(1).strip()
-        return None
+    def extract_first_group(self, message: str) -> Optional[str]:
+        m = re.search(r"\(([^)]*)\)", message)
+        return m.group(1).strip() if m else None
 
-    def extract_card_details(self, content: str) -> List[Tuple[str, str]]:
-        """Extrait la valeur et le costume des cartes."""
-        card_details = []
-        normalized_content = content.replace("❤️", "♥️") # Normalise le cœur
-        # Pattern pour capturer la valeur (chiffre ou lettre) et le symbole
-        card_pattern = r'(\d+|[AKQJ])(♠️|♥️|♦️|♣️)'
-        matches = re.findall(card_pattern, normalized_content, re.IGNORECASE)
-        for value, costume in matches:
-            card_details.append((value.upper(), costume))
-        return card_details
+    def extract_all_groups(self, message: str) -> List[str]:
+        return re.findall(r"\(([^)]*)\)", message)
+
+    def extract_cards(self, content: str) -> List[Tuple[str, str]]:
+        if not content:
+            return []
+        content = content.replace("❤️", "♥️")
+        matches = re.findall(r"(\d+|[AKQJ])(♠️|♥️|♦️|♣️)", content)
+        return [(v.upper(), s) for v, s in matches]
 
     def get_first_two_cards(self, content: str) -> List[str]:
-        """Renvoie les deux premières cartes pour le déclencheur INTER."""
-        card_details = self.extract_card_details(content)
-        first_two = card_details[:2]
-        return [f"{v}{c}" for v, c in first_two]
+        cards = self.extract_cards(content)
+        return [f"{v}{s}" for v, s in cards[:2]]
 
-    def check_value_Q_in_first_parentheses(self, message: str) -> Optional[Tuple[str, str]]:
-        """Vérifie si la Dame (Q) est dans le premier groupe et retourne sa valeur/couleur."""
-        first_parentheses_content = self.extract_first_parentheses_content(message)
-        if not first_parentheses_content:
-            return None
-            
-        card_details = self.extract_card_details(first_parentheses_content)
-        
-        for value, costume in card_details:
-            if value == "Q":
-                logger.info(f"🔍 Détection Q: Dame (Q) trouvée dans le premier groupe: {value}{costume}")
-                return (value, costume)
-                
+    def extract_total_points(self, message: str) -> Optional[int]:
+        m = re.search(r"#T(\d+)", message)
+        return int(m.group(1)) if m else None
+
+    def has_Q_in_group1(self, message: str):
+        g1 = self.extract_first_group(message)
+        cards = self.extract_cards(g1)
+        for v, s in cards:
+            if v == "Q":
+                return v, s
         return None
 
-    # --- Logique INTER (Mode Intelligent) - MISE À JOUR AVEC ANTI-DOUBLON ---
+    # ================================================================
+    #               CONDITION : MESSAGE FINALISÉ ? (OBLIGATOIRE)
+    # ================================================================
+
+    def is_finalized(self, message: str) -> bool:
+        return "✅" in message or "🔰" in message
+
+    # ================================================================
+    #                    INTER — APPRENTISSAGE N-2 → N
+    # ================================================================
+
     def collect_inter_data(self, game_number: int, message: str):
-        """Collecte les données (Déclencheur à N-2, Dame Q à N) selon la logique séquentielle."""
-        first_group_content = self.extract_first_parentheses_content(message)
-        if not first_group_content:
+        """INTER NE DOIT SE FAIRE QUE SUR MESSAGES FINALISÉS."""
+        if not self.is_finalized(message):
             return
 
-        # 1. ENREGISTRER LE JEU ACTUEL DANS L'HISTORIQUE SÉQUENTIEL (N)
-        first_two_cards = self.get_first_two_cards(first_group_content)
-        if len(first_two_cards) == 2:
-            self.sequential_history[game_number] = {
-                'cartes': first_two_cards,
-                'date': datetime.now().isoformat()
-            }
-        
-        # 2. VÉRIFIER SI CE JEU (N) EST LE RÉSULTAT (Dame Q)
-        q_card_details = self.check_value_Q_in_first_parentheses(message)
-        
-        if q_card_details:
-            # Si Dame Q trouvée à N, le déclencheur est N-2
-            n_minus_2_game = game_number - 2
-            
-            # 3. CHERCHER LE DÉCLENCHEUR (N-2) DANS L'HISTORIQUE EN ATTENTE
-            trigger_entry = self.sequential_history.get(n_minus_2_game)
-            
-            if trigger_entry:
-                trigger_cards = trigger_entry['cartes']
-                
-                # --- VÉRIFICATION ANTI-DOUBLON ---
-                is_duplicate = any(
-                    entry.get('numero_resultat') == game_number 
-                    for entry in self.inter_data
-                )
-                
-                if is_duplicate:
-                    logger.warning(f"❌ INTER Data Ignoré: Doublon détecté pour le numéro de résultat N={game_number}. Non ajouté à l'historique INTER.")
-                    return # Arrête le processus pour éviter l'enregistrement en double
-                # --------------------------------
+        g1 = self.extract_first_group(message)
+        if not g1:
+            return
 
-                new_entry = {
-                    'numero_resultat': game_number,
-                    'declencheur': trigger_cards,
-                    'numero_declencheur': n_minus_2_game,
-                    'carte_q': f"{q_card_details[0]}{q_card_details[1]}",
-                    'date_resultat': datetime.now().isoformat()
-                }
-                self.inter_data.append(new_entry)
-                self._save_all_data() 
-                logger.info(f"💾 INTER Data Saved: Q à N={game_number} déclenché par N-2={n_minus_2_game} ({trigger_cards})")
-        
-        # 4. NETTOYAGE: Supprimer les entrées très anciennes (par exemple, plus de 50 jeux avant)
-        obsolete_game_limit = game_number - 50 
+        first_two = self.get_first_two_cards(g1)
+        if len(first_two) == 2:
+            self.sequential_history[game_number] = {
+                "cartes": first_two,
+                "date": datetime.now().isoformat(),
+            }
+
+        q_info = self.has_Q_in_group1(message)
+        if not q_info:
+            return
+
+        trig_game = game_number - 2
+        if trig_game not in self.sequential_history:
+            return
+
+        # Anti-doublon
+        if any(entry["numero_resultat"] == game_number for entry in self.inter_data):
+            return
+
+        self.inter_data.append({
+            "numero_resultat": game_number,
+            "numero_declencheur": trig_game,
+            "declencheur": self.sequential_history[trig_game]["cartes"],
+            "carte_q": f"{q_info[0]}{q_info[1]}",
+            "date_resultat": datetime.now().isoformat()
+        })
+
+        # Nettoyage
+        limit = game_number - 60
         self.sequential_history = {
-            num: entry for num, entry in self.sequential_history.items() if num >= obsolete_game_limit
+            k: v for k, v in self.sequential_history.items() if k >= limit
         }
 
+        self._save_all()
 
-    def analyze_and_set_smart_rules(self, initial_load: bool = False) -> List[str]:
-        """Analyse l'historique et définit les 3 règles les plus fréquentes."""
-        declencheur_counts = {}
-        for data in self.inter_data:
-            declencheur_key = tuple(data['declencheur']) 
-            declencheur_counts[declencheur_key] = declencheur_counts.get(declencheur_key, 0) + 1
+    # ================================================================
+    #                  ANALYSE DES TOP 3 RÈGLES INTER
+    # ================================================================
 
-        sorted_declencheurs = sorted(
-            declencheur_counts.items(), 
-            key=lambda item: item[1], 
-            reverse=True
-        )
+    def analyze_and_set_smart_rules(self, initial_load=False):
+        counts = {}
+        for entry in self.inter_data:
+            trig = tuple(entry["declencheur"])
+            counts[trig] = counts.get(trig, 0) + 1
 
-        top_3 = [
-            {'cards': list(declencheur), 'count': count} 
-            for declencheur, count in sorted_declencheurs[:3]
-        ]
-        self.smart_rules = top_3
-        
-        # Activer le mode si des règles sont trouvées ou s'il s'agit d'un chargement initial
-        if top_3:
+        sorted_rules = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        top3 = sorted_rules[:3]
+
+        self.smart_rules = [{"cards": list(k), "count": v} for k, v in top3]
+
+        if top3:
             self.is_inter_mode_active = True
         elif not initial_load:
-            self.is_inter_mode_active = False 
+            self.is_inter_mode_active = False
 
-        # Sauvegarder le statut et les règles
-        self._save_data(self.is_inter_mode_active, 'inter_mode_status.json')
-        self._save_data(self.smart_rules, 'smart_rules.json')
-            
-        return [f"{cards['cards'][0]} {cards['cards'][1]} (x{cards['count']})" for cards in top_3]
+        self._save_all()
 
-    def get_inter_status(self) -> Tuple[str, Optional[Dict]]:
-        """Génère le statut pour la commande /inter avec l'historique et les boutons."""
-        status_lines = ["**📋 HISTORIQUE D'APPRENTISSAGE INTER 🧠**\n"]
-        total_collected = len(self.inter_data) 
-        
-        status_lines.append(f"**Mode Intelligent Actif:** {'✅ OUI' if self.is_inter_mode_active else '❌ NON'}")
-        status_lines.append(f"**Historique Q collecté:** **{total_collected} entrées.**\n")
-
-        # Afficher la liste complète des enregistrements récents (Max 10)
-        if total_collected > 0:
-            status_lines.append("**Derniers Enregistrements (N-2 → Q à N):**")
-            for entry in self.inter_data[-10:]:
-                declencheur_str = f"{entry['declencheur'][0]} {entry['declencheur'][1]}"
-                line = (
-                    f"• N{entry['numero_resultat']} ({entry['carte_q']}) "
-                    f"→ Déclencheur N{entry['numero_declencheur']} ({declencheur_str})"
-                )
-                status_lines.append(line)
-        else:
-             status_lines.append("\n*Aucun historique de Dame (Q) collecté. Le bot ne peut pas créer de règles intelligentes.*")
-
-        status_lines.append("\n---\n")
-        
-        # Afficher les règles actuelles si actives
-        if self.is_inter_mode_active and self.smart_rules:
-            status_lines.append("**🎯 Règles Actives (Top 3 Déclencheurs):**")
-            for rule in self.smart_rules:
-                status_lines.append(f"- {rule['cards'][0]} {rule['cards'][1]} (x{rule['count']})")
-            status_lines.append("\n---")
-
-
-        # PRÉSENTER LES BOUTONS
-        if total_collected > 0:
-            # Si déjà actif, proposer de re-analyser ou de désactiver
-            if self.is_inter_mode_active:
-                 apply_button_text = f"🔄 Re-analyser et appliquer (Actif)"
-            else:
-                 # Si inactif mais données disponibles, proposer l'activation
-                 apply_button_text = f"✅ Appliquer Règle Intelligente ({total_collected} entrées)"
-
-            keyboard = {'inline_keyboard': [
-                [{'text': apply_button_text, 'callback_data': 'inter_apply'}],
-                [{'text': "➡️ Règle par Défaut (Ignorer l'historique)", 'callback_data': 'inter_default'}]
-            ]}
-        else:
-            keyboard = None 
-            status_lines.append("*Aucune action disponible. Attendez plus de données.*")
-
-        return "\n".join(status_lines), keyboard
+        return [
+            f"{r['cards'][0]} {r['cards'][1]} (x{r['count']})"
+            for r in self.smart_rules
+]
+        # ================================================================
+    #                      UTILITAIRES
+    # ================================================================
 
     def can_make_prediction(self) -> bool:
-        """Vérifie la période de refroidissement."""
+        """Retourne True si le cooldown est passé."""
         if not self.last_prediction_time:
             return True
-        return time.time() > (self.last_prediction_time + self.prediction_cooldown)
+        try:
+            return time.time() > (float(self.last_prediction_time) + self.prediction_cooldown)
+        except Exception:
+            return True
 
-    # --- MÉTHODES DE FILTRAGE ---
-    def has_pending_indicators(self, message: str) -> bool:
-        """
-        Vérifie la présence des indicateurs d'état temporaire (🕐 ou ⏰).
-        Si l'un d'eux est présent, le message est en attente.
-        """
-        return '🕐' in message or '⏰' in message
-        
-    def has_completion_indicators(self, message: str) -> bool:
-        """
-        Vérifie la présence des indicateurs de succès explicites (✅ ou 🔰).
-        """
-        return '✅' in message or '🔰' in message
-    # ----------------------------
+    def mark_processed(self, message: str):
+        """Marque un message comme traité en stockant son hash."""
+        h = hash(message)
+        self.processed_messages.add(h)
+        self._save_all()
 
-    # (La suite de cette partie est dans la Partie 2)
-    def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str]]:
-        """Détermine si une prédiction doit être faite."""
+    # ================================================================
+    #                    LOGIQUE DE PRÉDICTION (PARTIE 2)
+    # ================================================================
+
+    def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[int]]:
+        """
+        Analyse un message FINALISÉ et décide si une prédiction Q doit être faite.
+        Retour: (do_predict, game_number, confidence_percent) — si do_predict True, faire make_prediction(game_number, confidence)
+        """
+        # 0. Vérifier canal
         if not self.target_channel_id:
-             return False, None, None
-             
+            return False, None, None
+
+        # 1. Extraction du numéro
         game_number = self.extract_game_number(message)
         if not game_number:
             return False, None, None
 
-        # --- ÉTAPE CRITIQUE: Collecte de données pour INTER ---
-        self.collect_inter_data(game_number, message) 
-        # ----------------------------------------------------
-        
-        # 1. BLOCAGE IMMEDIAT si le message est en attente (🕐/⏰)
-        if self.has_pending_indicators(message):
-            return False, None, None 
-        
-        # 2. VÉRIFICATION STRICTE DE FINALISATION (Doit avoir ✅ ou 🔰)
-        if not self.has_completion_indicators(message):
-            logger.info("❌ PRÉDICTION BLOQUÉE: Message stable, mais sans indicateur de succès explicite (✅/🔰).")
-            return False, None, None
-            
-        predicted_value = None
-        first_group_content = self.extract_first_parentheses_content(message)
-
-        if first_group_content:
-            card_details = self.extract_card_details(first_group_content)
-            card_values = [v for v, c in card_details]
-            
-            # Extraction du second groupe pour les règles statiques 2 et 3
-            second_parentheses_pattern = r'\(([^)]*)\)'
-            all_matches = re.findall(second_parentheses_pattern, message)
-            second_group_content = all_matches[1] if len(all_matches) > 1 else ""
-            second_group_details = self.extract_card_details(second_group_content)
-            second_group_values = [v for v, c in second_group_details]
-            
-            
-            # --- LOGIQUE DE PRÉDICTION ---
-            
-            # 1. LOGIQUE INTER (PRIORITÉ)
-            if self.is_inter_mode_active and self.smart_rules:
-                current_trigger_cards = self.get_first_two_cards(first_group_content)
-                current_trigger_tuple = tuple(current_trigger_cards)
-                
-                if any(tuple(rule['cards']) == current_trigger_tuple for rule in self.smart_rules):
-                    predicted_value = "Q"
-                    logger.info(f"🔮 PRÉDICTION INTER: Déclencheur {current_trigger_cards} trouvé dans les règles intelligentes.")
-            
-            
-            # 2. LOGIQUE STATIQUE (SEULEMENT SI INTER N'A PAS DÉJÀ PRÉDIT)
-            if not predicted_value:
-                # Cartes fortes (A, K, Q, J)
-                all_high_cards = HIGH_VALUE_CARDS
-                
-                # Règle Statique 1: Deux Valets (J)
-                if card_values.count('J') >= 2:
-                    predicted_value = "Q"
-                    logger.info("🔮 PRÉDICTION STATIQUE 1: Deux Valets (J) trouvés.")
-
-                # Règle Statique 2: Un Valet (J) + pas de carte forte dans le 2e groupe
-                elif card_values.count('J') == 1:
-                    has_high_value_in_second = any(v in all_high_cards for v in second_group_values)
-                    
-                    if not has_high_value_in_second:
-                        predicted_value = "Q"
-                        logger.info("🔮 PRÉDICTION STATIQUE 2: Un Valet (J) sans carte forte dans le 2e groupe.")
-
-
-                # -----------------------------------------------------------
-                # NOUVELLE RÈGLE STATIQUE 3: G1 (K+J) ET G2 (Faible)
-                # -----------------------------------------------------------
-                
-                # Condition G1: Contient K ET J (Combinaison)
-                has_k_in_g1 = 'K' in card_values
-                has_j_in_g1 = 'J' in card_values
-                
-                # Condition G2: AUCUNE carte de haute valeur (A, K, Q, J)
-                is_g2_weak = not any(v in all_high_cards for v in second_group_values)
-
-                if has_k_in_g1 and has_j_in_g1 and is_g2_weak:
-                    predicted_value = "Q"
-                    logger.info("🔮 PRÉDICTION STATIQUE 3: G1 (K+J) et G2 (Faible) combinés.")
-
-                # -----------------------------------------------------------
-                # NOUVELLE RÈGLE STATIQUE 4: Deux groupes faibles consécutifs
-                # -----------------------------------------------------------
-                elif not predicted_value:
-                    # Les cartes fortes pour cette règle sont: A, K, Q, J
-                    is_current_g1_weak = not any(v in all_high_cards for v in card_values)
-                    
-                    if is_current_g1_weak:
-                        # Vérifier l'historique du jeu précédent (N-1)
-                        previous_game_number = game_number - 1
-                        previous_entry = self.sequential_history.get(previous_game_number)
-
-                        if previous_entry:
-                            # Le sequential_history stocke les deux premières cartes du premier groupe.
-                            previous_cards = previous_entry['cartes'] 
-                            
-                            # Extraire les valeurs (ex: '9', '7')
-                            previous_values = [re.match(r'(\d+|[AKQJ])', c).group(1) for c in previous_cards if re.match(r'(\d+|[AKQJ])', c)]
-                            
-                            is_previous_g1_weak = not any(v in all_high_cards for v in previous_values)
-                            
-                            if is_previous_g1_weak:
-                                predicted_value = "Q"
-                                logger.info(f"🔮 PRÉDICTION STATIQUE 4: G1 faible consécutif détecté (Jeu {previous_game_number} et {game_number}).")
-
-        # ... (Fin de should_predict)
-
-        if predicted_value and not self.can_make_prediction():
-            logger.warning("⏳ PRÉDICTION ÉVITÉE: En période de 'cooldown'.")
+        # 2. N'ANALYSE QUE SI MESSAGE FINALISÉ
+        if not self.is_finalized(message):
+            # Collecte INTER seulement sur messages finalisés (déjà géré ailleurs)
             return False, None, None
 
-        if predicted_value:
-            message_hash = hash(message)
-            if message_hash not in self.processed_messages:
-                self.processed_messages.add(message_hash)
-                self.last_prediction_time = time.time()
-                self._save_all_data()
-                return True, game_number, predicted_value
+        # 3. Collecter données INTER (N-2 -> N)
+        self.collect_inter_data(game_number, message)
 
+        # 4. Anti-duplication: message déjà traité ?
+        msg_hash = hash(message)
+        if msg_hash in self.processed_messages:
+            return False, None, None
+
+        # 5. En période de cooldown ?
+        if not self.can_make_prediction():
+            logger.warning("⏳ PRÉDICTION BLOQUÉE: cooldown actif.")
+            return False, None, None
+
+        # 6. Extractions utiles
+        g1_content = self.extract_first_group(message)
+        all_groups = self.extract_all_groups(message)
+        g2_content = all_groups[1] if len(all_groups) > 1 else ""
+        g1_cards = [v for v, s in self.extract_cards(g1_content)]
+        g2_cards = [v for v, s in self.extract_cards(g2_content)]
+
+        # 7. Priorité : Mode INTER (règles apprises)
+        if self.is_inter_mode_active and self.smart_rules:
+            current_trigger = self.get_first_two_cards(g1_content)
+            current_trigger_tuple = tuple(current_trigger)
+            for rule in self.smart_rules:
+                if tuple(rule["cards"]) == current_trigger_tuple:
+                    confidence = 100  # les règles INTER sont considérées très fiables ; tu peux ajuster
+                    logger.info(f"🔮 PRÉDICTION INTER: déclencheur trouvé {current_trigger} -> Q (conf {confidence}%)")
+                    # marquer processed et enregistrer prédiction
+                    self.mark_processed(message)
+                    self.last_prediction_time = time.time()
+                    self._save_all()
+                    return True, game_number, confidence
+
+        # 8. Bloc Règles Statiques dans l'ordre demandé
+
+        # Règle 2.1 : Valet solitaire (G1 contient exactement 1 J et aucune A/K/Q)
+        if g1_cards.count("J") == 1 and not any(v in ["A", "K", "Q"] for v in g1_cards if v != "J"):
+            confidence = CONFIDENCE_RULES["2.1"]
+            logger.info(f"🔮 PRÉDICTION STATIQUE 2.1: Valet solitaire -> conf {confidence}%")
+            self.mark_processed(message)
+            self.last_prediction_time = time.time()
+            self._save_all()
+            return True, game_number, confidence
+
+        # Règle 2.2 : Deux Valets ou plus (G1)
+        if g1_cards.count("J") >= 2:
+            confidence = CONFIDENCE_RULES["2.2"]
+            logger.info(f"🔮 PRÉDICTION STATIQUE 2.2: Deux Valets -> conf {confidence}%")
+            self.mark_processed(message)
+            self.last_prediction_time = time.time()
+            self._save_all()
+            return True, game_number, confidence
+
+        # Règle 2.3 : Total des points du jeu (#T >= 45)
+        total_points = self.extract_total_points(message)
+        if total_points is not None and total_points >= 45:
+            confidence = CONFIDENCE_RULES["2.3"]
+            logger.info(f"🔮 PRÉDICTION STATIQUE 2.3: Total #T{total_points} >=45 -> conf {confidence}%")
+            self.mark_processed(message)
+            self.last_prediction_time = time.time()
+            self._save_all()
+            return True, game_number, confidence
+
+        # Règle 2.4 : Manque consécutif de Q (>=4 jeux N-1..N-4 sans Q en G1)
+        missing_q_count = 0
+        for prev in range(game_number - 1, game_number - 5, -1):
+            prev_entry = self.sequential_history.get(prev)
+            if not prev_entry:
+                # si pas d'info, on considère absence de Q (estimation conservative)
+                missing_q_count += 1
+            else:
+                # vérifier si Q était présent dans le message correspondant (si on a stocké ça)
+                # On ne stocke pas le texte original; on utilise inter_data pour connaître les résultats
+                # Si inter_data contient un entry pour prev where carte_q exists -> Q was found
+                found_q = any(e["numero_resultat"] == prev for e in self.inter_data)
+                if not found_q:
+                    missing_q_count += 1
+
+        if missing_q_count >= 4:
+            confidence = CONFIDENCE_RULES["2.4"]
+            logger.info(f"🔮 PRÉDICTION STATIQUE 2.4: Manque consécutif de Q ({missing_q_count}) -> conf {confidence}%")
+            self.mark_processed(message)
+            self.last_prediction_time = time.time()
+            self._save_all()
+            return True, game_number, confidence
+
+        # Règle 2.5 : Présence des 8,9,10 dans G1 ou G2 (peut être réparti)
+        found_vals = set(g1_cards + g2_cards)
+        if {"8", "9", "10"}.issubset(found_vals):
+            confidence = CONFIDENCE_RULES["2.5"]
+            logger.info(f"🔮 PRÉDICTION STATIQUE 2.5: Combinaison 8-9-10 -> conf {confidence}%")
+            self.mark_processed(message)
+            self.last_prediction_time = time.time()
+            self._save_all()
+            return True, game_number, confidence
+
+        # Règle 2.6 : Bloc de fin (au moins une des sous-conditions)
+        # A) K & J dans G1
+        condA = ("K" in g1_cards) and ("J" in g1_cards)
+        # B) tags O ou R dans le message
+        condB = bool(re.search(r"\b[OR]\b", message)) or (" O " in message) or (" R " in message)
+        # C) Double faiblesse consécutive: G1 current weak and previous G1 weak
+        def is_group_weak(cards_list):
+            return not any(v in HIGH_VALUE_CARDS for v in cards_list)
+
+        condC = False
+        if is_group_weak(g1_cards):
+            prev_entry = self.sequential_history.get(game_number - 1)
+            if prev_entry:
+                prev_values = [re.match(r"(\d+|[AKQJ])", c).group(1) for c in prev_entry["cartes"] if re.match(r"(\d+|[AKQJ])", c)]
+                condC = is_group_weak(prev_values)
+
+        if condA or condB or condC:
+            confidence = CONFIDENCE_RULES["2.6"]
+            logger.info(f"🔮 PRÉDICTION STATIQUE 2.6: Bloc final (A:{condA},B:{condB},C:{condC}) -> conf {confidence}%")
+            self.mark_processed(message)
+            self.last_prediction_time = time.time()
+            self._save_all()
+            return True, game_number, confidence
+
+        # Aucune règle déclenchée
         return False, None, None
-        
-    def make_prediction(self, game_number: int, predicted_value: str) -> str:
-        """Génère le message de prédiction et l'enregistre."""
-        target_game = game_number + 2
-        prediction_text = f"🔵{target_game}🔵:Valeur Q statut :⏳"
 
-        self.predictions[target_game] = {
-            'predicted_costume': 'Q',
-            'status': 'pending',
-            'predicted_from': game_number,
-            'verification_count': 0,
-            'message_text': prediction_text,
-            'message_id': None 
+    # ================================================================
+    #                    CRÉATION / ENREGISTREMENT PRÉDICTION
+    # ================================================================
+
+    def make_prediction(self, game_number: int, confidence: int) -> str:
+        """
+        Enregistre la prédiction pour game_number+2 avec la confiance.
+        Retourne le texte du message à poster.
+        """
+        target_game = game_number + 2
+        message_text = f\"🔵{target_game}🔵:Valeur Q statut :⏳ ({confidence}%)\"
+
+        # Stocker en tant que clé str pour JSON convivial
+        key = str(target_game)
+        self.predictions[key] = {
+            "predicted_costume": "Q",
+            "status": "pending",
+            "predicted_from": game_number,
+            "verification_count": 0,
+            "message_text": message_text,
+            "message_id": None,
+            "confidence": int(confidence),
+            "created_at": datetime.now().isoformat(),
         }
-        self._save_all_data()
-        return prediction_text
-        
+        self._save_all()
+        logger.info(f\"💾 Prédiction créée pour {target_game} (depuis {game_number}) conf {confidence}%\")
+        return message_text
+
+    # ================================================================
+    #                    VÉRIFICATION DES PRÉDICTIONS
+    # ================================================================
+
     def _verify_prediction_common(self, text: str, is_edited: bool = False) -> Optional[Dict]:
-        """Vérifie si le message contient le résultat pour une prédiction en attente (Q)."""
-        game_number = self.extract_game_number(text)
-        if not game_number or not self.predictions:
+        """
+        Vérifie si le message (finalisé) correspond au résultat d'une prédiction en attente.
+        Retourne dict d'action si une mise à jour est nécessaire:
+        { 'type': 'edit_message', 'predicted_game': X, 'new_message': '...' }
+        """
+        # Ne rien faire si message non finalisé
+        if not self.is_finalized(text):
             return None
 
-        # Vérifie uniquement les prédictions N, N-1, N-2 par rapport au message entrant
-        for predicted_game in sorted(self.predictions.keys()):
-            prediction = self.predictions[predicted_game]
+        game_number = self.extract_game_number(text)
+        if not game_number:
+            return None
 
-            if prediction.get('status') != 'pending' or prediction.get('predicted_costume') != 'Q':
+        # Parcourir prédictions en attente
+        keys = list(self.predictions.keys())
+        for k in keys:
+            try:
+                predicted_game = int(k)
+            except ValueError:
+                continue
+            prediction = self.predictions.get(str(predicted_game))
+            if not prediction:
                 continue
 
-            verification_offset = game_number - predicted_game
-            
-            # Vérification pour N, N+1, N+2 par rapport à la prédiction
+            if prediction.get("status") != "pending" or prediction.get("predicted_costume") != "Q":
+                continue
+
+            verification_offset = game_number - predicted_game  # 0..2 expected
             if 0 <= verification_offset <= 2:
+                q_found = self.has_Q_in_group1(text)
+                confidence = prediction.get("confidence", None) or 0
+
                 status_symbol_map = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}
-                q_found = self.check_value_Q_in_first_parentheses(text)
-                
                 if q_found:
-                    # SUCCÈS - Dame (Q) trouvée
-                    status_symbol = status_symbol_map[verification_offset]
-                    updated_message = f"🔵{predicted_game}🔵:Valeur Q statut :{status_symbol}"
-                    
-                    prediction['status'] = f'correct_offset_{verification_offset}'
-                    prediction['verification_count'] = verification_offset
-                    prediction['final_message'] = updated_message
-                    self._save_all_data()
-                    
-                    logger.info(f"🔍 ✅ SUCCÈS OFFSET +{verification_offset} - Dame (Q) trouvée au jeu {game_number}")
-                    
-                    return {
-                        'type': 'edit_message',
-                        'predicted_game': predicted_game,
-                        'new_message': updated_message,
-                    }
-                elif verification_offset == 2 and not q_found:
-                    # ÉCHEC à offset +2 - MARQUER ❌ (RIEN TROUVÉ)
-                    updated_message = f"🔵{predicted_game}🔵:Valeur Q statut :❌"
+                    status_symbol = status_symbol_map.get(verification_offset, "✅")
+                    updated_message = f\"🔵{predicted_game}🔵:Valeur Q statut :{status_symbol} ({confidence}%)\"
 
-                    prediction['status'] = 'failed'
-                    prediction['final_message'] = updated_message
-                    self._save_all_data()
-                    
-                    logger.info(f"🔍 ❌ ÉCHEC OFFSET +2 - Rien trouvé, prédiction marquée: ❌")
+                    prediction["status"] = f\"correct_offset_{verification_offset}\"
+                    prediction["verification_count"] = verification_offset
+                    prediction["final_message"] = updated_message
+                    prediction["finalized_at"] = datetime.now().isoformat()
+                    self._save_all()
 
+                    logger.info(f\"🔍 ✅ SUCCÈS OFFSET +{verification_offset} - Dame trouvée au jeu {game_number} (pred {predicted_game})\")
                     return {
-                        'type': 'edit_message',
-                        'predicted_game': predicted_game,
-                        'new_message': updated_message,
+                        "type": "edit_message",
+                        "predicted_game": predicted_game,
+                        "new_message": updated_message,
                     }
+                else:
+                    # Si on est à offset 2 et toujours rien => échec
+                    if verification_offset == 2:
+                        updated_message = f\"🔵{predicted_game}🔵:Valeur Q statut :❌ ({confidence}%)\"
+                        prediction["status"] = "failed"
+                        prediction["final_message"] = updated_message
+                        prediction["finalized_at"] = datetime.now().isoformat()
+                        self._save_all()
+                        logger.info(f\"🔍 ❌ ÉCHEC OFFSET +2 - Rien trouvé pour prédiction {predicted_game}\")
+                        return {
+                            "type": "edit_message",
+                            "predicted_game": predicted_game,
+                            "new_message": updated_message,
+                        }
         return None
-        
+
+    # ================================================================
+    #                         FIN DE LA CLASSE
+    # ================================================================
