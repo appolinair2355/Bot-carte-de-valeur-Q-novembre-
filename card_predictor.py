@@ -2,7 +2,7 @@
 
 """
 Card prediction logic for Joker's Telegram Bot - simplified for webhook deployment
-Updated with Confidence Levels (99%, 67%, 55%, 45%, 41%)
+Version finale intégrée : Correction de l'erreur d'unpacking (retourne 4 valeurs).
 """
 import re
 import logging
@@ -180,7 +180,7 @@ class CardPredictor:
                     logger.info(f"💾 INTER: Q à N={game_number} déclenché par N-2={n_minus_2_game}")
         
         obsolete_game_limit = game_number - 50 
-        self.sequential_history = {num: entry for num, entry in self.sequential_history.items() if num >= obsolete_game_limit}
+        self.sequential_history = {num: entry for num: entry in self.sequential_history.items() if num >= obsolete_game_limit}
 
     def analyze_and_set_smart_rules(self, initial_load: bool = False) -> List[str]:
         declencheur_counts = {}
@@ -235,8 +235,11 @@ class CardPredictor:
         return '✅' in message or '🔰' in message
 
     # --- LOGIQUE PRINCIPALE (AVEC CONFIANCE) ---
-    # Modifié pour retourner aussi la confiance (str)
     def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str], Optional[str]]:
+        """
+        Détermine si une prédiction doit être faite.
+        Retourne (statut, numéro_jeu, valeur_prédite, confiance)
+        """
         if not self.target_channel_id: return False, None, None, None
              
         game_number = self.extract_game_number(message)
@@ -267,10 +270,10 @@ class CardPredictor:
             current_trigger = tuple(self.get_first_two_cards(g1_content))
             if any(tuple(rule['cards']) == current_trigger for rule in self.smart_rules):
                 predicted_value = "Q"
-                confidence = "100% 🧠" # Confiance max pour le machine learning
+                confidence = "100% 🧠" 
                 logger.info(f"🔮 PRÉDICTION INTER: Règle intelligente.")
         
-        # --- LOGIQUE STATIQUE ---
+        # --- LOGIQUE STATIQUE (vérifiée uniquement si l'INTER n'a pas prédit) ---
         if not predicted_value:
             all_high = HIGH_VALUE_CARDS 
             has_j_in_g1 = 'J' in g1_values
@@ -310,18 +313,21 @@ class CardPredictor:
                         confidence = "45%"
                         logger.info(f"🔮 RÈGLE 3 (45%): Faibles consécutives.")
 
-            # --- RÈGLE 4 (41%): Total ≥ 45 ---
+            # --- RÈGLE 4 (41%): Total Jeu (Somme des valeurs) ≥ 45 ---
             if not predicted_value:
                 total_sum = sum(self._get_card_numeric_value(v) for v in g1_values + g2_values)
+                
                 if total_sum >= 45:
                     predicted_value = "Q"
                     confidence = "41%"
                     logger.info(f"🔮 RÈGLE 4 (41%): Total {total_sum} ≥ 45.")
 
+        # 4. VÉRIFICATION FINALE ET ENVOI
+        
         # Vérification Cooldown
         if predicted_value and not self.can_make_prediction():
             logger.warning("⏳ PRÉDICTION ÉVITÉE: Cooldown actif.")
-            return False, None, None, None
+            return False, None, None, None # Retourne 4
 
         if predicted_value:
             msg_hash = hash(message)
@@ -329,10 +335,10 @@ class CardPredictor:
                 self.processed_messages.add(msg_hash)
                 self.last_prediction_time = time.time()
                 self._save_all_data()
-                # Retourne maintenant la confiance aussi
+                # 🟢 FIX: Retourne 4 valeurs (résout l'erreur d'unpacking)
                 return True, game_number, predicted_value, confidence
 
-        return False, None, None, None
+        return False, None, None, None # Retourne 4
         
     def make_prediction(self, game_number: int, predicted_value: str, confidence: str = "") -> str:
         """Génère le message avec la confiance incluse."""
@@ -384,4 +390,4 @@ class CardPredictor:
                     logger.info(f"🔍 ❌ ÉCHEC OFFSET +2")
                     return {'type': 'edit_message', 'predicted_game': predicted_game, 'new_message': final_msg}
         return None
-        
+    
