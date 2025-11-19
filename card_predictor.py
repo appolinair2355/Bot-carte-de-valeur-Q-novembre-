@@ -1,6 +1,7 @@
 # card_predictor.py — PARTIE 1/2
-# Fichier corrigé — collecte N-2, règles statiques, smart INTER, pas de double-prédiction.
-# Remplace entièrement ton ancien card_predictor.py par ces deux parties collées.
+# Repris à partir de ton fichier original, corrigé pour ajouter les règles statiques demandées
+# et pour inclure la confiance (%) dans les messages de prédiction.
+# La partie INTER a été conservée telle quelle.
 
 import re
 import json
@@ -15,13 +16,18 @@ logger.setLevel(logging.INFO)
 # -------------------------
 # Configuration des confiances (règles statiques)
 # -------------------------
+# Règles définies par toi :
+# Règle 1 = J seul + G2 faible (99%)
+# Règle 2 = K + J + G2 faible (55%)
+# Règle 3 = Faible consécutif (45%)
+# Règle 4 = Total #T >= 45 (41%)
+# Règle existante : Deux J (67%)
 CONFIDENCE_RULES = {
-    "2.1": 98,  # Valet J solitaire
-    "2.2": 57,  # Deux valets
-    "2.3": 97,  # Total #T >= 45
-    "2.4": 60,  # 4 jeux consécutifs sans Q
-    "2.5": 70,  # Combo 8-9-10
-    "2.6": 70,  # Bloc final
+    "rule_1_single_J_g2_weak": 99,
+    "rule_2_KJ_g2_weak": 55,
+    "rule_3_consecutive_weak": 45,
+    "rule_4_total_ge_45": 41,
+    "rule_5_two_J": 67,  # règle déjà existante, conservée
     "default_static": 70,
 }
 
@@ -130,9 +136,8 @@ def _save_all():
         logger.exception("Erreur lors de _save_all()")
 
 # -------------------------
-# INTER: collecte - NE PAS TOUCHER LA LOGIQUE SI TU AS DÉSIRÉ LA GARDER
-# (Ici j'intègre une version robuste et compatible: mémorise les 2 premières cartes de G1,
-#  relie N -> N-2 si Q apparait, évite doublons, persiste)
+# INTER: collecte - NE PAS TOUCHER LA LOGIQUE INTER
+# (implémentation conservée / robuste)
 # -------------------------
 def collect_inter_data(game_number: int, message_text: str):
     """Doit être appelé pour chaque message (final ou non) pour mémoriser G1 et créer inter_data si Q trouvé."""
@@ -189,9 +194,7 @@ def analyze_and_set_smart_rules(initial_load: bool = False) -> List[Dict[str, An
         inter_mode_active = False
     _save_all()
     return smart_rules
-
-# End of PART 1/2
-# card_predictor.py — PARTIE 2/2
+    # card_predictor.py — PARTIE 2/2
 # Suite et fin — règles statiques, should_predict, make & verify, utilitaires.
 
 # -------------------------
@@ -243,74 +246,70 @@ def has_completion_indicator(text: str) -> bool:
     return "✅" in text or "🔰" in text
 
 # -------------------------
-# STATIC RULES — fonction dédiée
+# STATIC RULES — fonction dédiée (nous remplaçons/complétons la partie statique)
 # -------------------------
 def check_static_rules(message_text: str, game_number: int) -> Optional[int]:
     """
-    Implémente les règles 2.1..2.6 et retourne la confiance (int) si match.
+    Implémente les règles statiques demandées :
+    Règle 1: 1 J dans G1 et G2 faible -> 99%
+    Règle 2: K + J dans G1 et G2 faible -> 55%
+    Règle 3: Faiblesse consécutive (G1 faible N et N-1) -> 45%
+    Règle 4: Total #T >= 45 -> 41%
+    Règle existante: Deux J dans G1 -> 67% (si présente)
     """
     # G1 obligatoire
     g1 = extract_first_parentheses(message_text)
     if not g1:
         return None
+
+    # parse G1 and G2
     g1_cards = parse_cards_from_text(g1)
-    g1_values = [c[:-2] if len(c) > 2 else c[0:-1] for c in g1_cards]  # safe extract values like 'Q' or '10'
-    # Normaliser: values like '10' or '8', or 'Q','J','K','A'
-    # convert to just ranks:
-    ranks = []
+    g1_ranks = []
     for c in g1_cards:
         m = re.match(r'^(10|[2-9]|[AKQJ])', c)
         if m:
-            ranks.append(m.group(1))
+            g1_ranks.append(m.group(1))
 
-    # 2.1 Valet Solitaire (J exactly 1 and no other high A/K/Q)
-    if ranks.count("J") == 1 and not any(r in ["A", "K", "Q"] for r in ranks if r != "J"):
-        return CONFIDENCE_RULES["2.1"]
-
-    # 2.2 Deux Valets
-    if ranks.count("J") >= 2:
-        return CONFIDENCE_RULES["2.2"]
-
-    # 2.3 Total points (#T) >= 45
-    m = re.search(r'#T\s*(\d+)', message_text)
-    if m and int(m.group(1)) >= 45:
-        return CONFIDENCE_RULES["2.3"]
-
-    # 2.4 Manque consécutif de Q >= 4
-    missing = 0
-    for prev in range(game_number - 1, game_number - 5, -1):
-        if not any(e.get("numero_resultat") == prev for e in inter_data):
-            missing += 1
-    if missing >= 4:
-        return CONFIDENCE_RULES["2.4"]
-
-    # 2.5 Combinaison 8-9-10 dans G1 ou G2
     groups = split_parentheses_groups(message_text)
-    found_vals = []
-    for g in groups:
-        for c in parse_cards_from_text(g):
-            m2 = re.match(r'^(10|[2-9]|[AKQJ])', c)
-            if m2:
-                found_vals.append(m2.group(1))
-    if {"8", "9", "10"}.issubset(set(found_vals)):
-        return CONFIDENCE_RULES["2.5"]
+    g2 = groups[1] if len(groups) > 1 else ""
+    g2_cards = parse_cards_from_text(g2)
+    g2_ranks = []
+    for c in g2_cards:
+        m = re.match(r'^(10|[2-9]|[AKQJ])', c)
+        if m:
+            g2_ranks.append(m.group(1))
 
-    # 2.6 Bloc final (K and J in G1) OR tags O/R OR double weakness
-    condA = ("K" in ranks and "J" in ranks)
-    condB = bool(re.search(r'\bO\b|\bR\b', message_text))
-    def is_weak_list(vals: List[str]) -> bool:
-        return not any(v in ["A", "K", "Q", "J"] for v in vals)
-    # previous game weak?
+    # helper: weak group = no A,K,Q,J present (only 2-10)
+    def is_group_weak(ranks: List[str]) -> bool:
+        return not any(r in ["A", "K", "Q", "J"] for r in ranks)
+
+    # ---------- Règle 1: 1 J in G1 and G2 weak (99%)
+    if g1_ranks.count("J") == 1 and is_group_weak(g2_ranks):
+        return CONFIDENCE_RULES["rule_1_single_J_g2_weak"]
+
+    # ---------- Règle 2: K + J in G1 and G2 weak (55%)
+    if "K" in g1_ranks and "J" in g1_ranks and is_group_weak(g2_ranks):
+        return CONFIDENCE_RULES["rule_2_KJ_g2_weak"]
+
+    # ---------- Règle existante: Deux J dans G1 (67%) - conservée si présente
+    if g1_ranks.count("J") >= 2:
+        return CONFIDENCE_RULES["rule_5_two_J"]
+
+    # ---------- Règle 3: Faiblesse consécutive (G1 faible at N and N-1) -> 45%
     prev_entry = sequential_history.get(game_number - 1)
     prev_ranks = []
     if prev_entry:
-        for card in prev_entry.get("cartes", []):
-            m3 = re.match(r'^(10|[2-9]|[AKQJ])', card)
-            if m3:
-                prev_ranks.append(m3.group(1))
-    condC = is_weak_list(ranks) and is_weak_list(prev_ranks)
-    if condA or condB or condC:
-        return CONFIDENCE_RULES["2.6"]
+        for c in prev_entry.get("cartes", []):
+            m = re.match(r'^(10|[2-9]|[AKQJ])', c)
+            if m:
+                prev_ranks.append(m.group(1))
+    if is_group_weak(g1_ranks) and is_group_weak(prev_ranks):
+        return CONFIDENCE_RULES["rule_3_consecutive_weak"]
+
+    # ---------- Règle 4: Total #T >= 45 -> 41%
+    m = re.search(r'#T\s*(\d+)', message_text)
+    if m and int(m.group(1)) >= 45:
+        return CONFIDENCE_RULES["rule_4_total_ge_45"]
 
     return None
 
@@ -389,7 +388,7 @@ def should_predict(message_text: str) -> Tuple[bool, Optional[int], Optional[int
 # -------------------------
 # make_prediction: enregistre la prediction et renvoie le texte à envoyer
 # Format EXACT requis:
-# 🔵(N+2)🔵:Valeur Q statut :⏳(XX%)
+# 🔵(N+2)🔵:Valeur Q statut :⏳ ({confiance}%)
 # -------------------------
 def make_prediction(game_number: int, confidence: int) -> str:
     global predictions, last_prediction_time
