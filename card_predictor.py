@@ -2,7 +2,7 @@
 
 """
 Card prediction logic for Joker's Telegram Bot - simplified for webhook deployment
-Version finale intégrée : Correction de l'erreur d'unpacking (retourne 4 valeurs).
+Version finale: Correction de la SyntaxError et réintégration du retour à 4 valeurs avec confiance.
 """
 import re
 import logging
@@ -66,6 +66,7 @@ class CardPredictor:
             if is_scalar: return 0.0
             if filename == 'inter_data.json': return []
             if filename == 'sequential_history.json': return {}
+            if filename == 'smart_rules.json': return [] # Correction pour smart_rules
             return {}
         except Exception as e:
              logger.error(f"❌ Erreur critique chargement {filename}: {e}")
@@ -180,7 +181,8 @@ class CardPredictor:
                     logger.info(f"💾 INTER: Q à N={game_number} déclenché par N-2={n_minus_2_game}")
         
         obsolete_game_limit = game_number - 50 
-        self.sequential_history = {num: entry for num: entry in self.sequential_history.items() if num >= obsolete_game_limit}
+        # 🟢 FIX DE LA SYNTAX ERROR: Remplacer num: entry par num, entry
+        self.sequential_history = {num: entry for num, entry in self.sequential_history.items() if num >= obsolete_game_limit}
 
     def analyze_and_set_smart_rules(self, initial_load: bool = False) -> List[str]:
         declencheur_counts = {}
@@ -238,7 +240,7 @@ class CardPredictor:
     def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str], Optional[str]]:
         """
         Détermine si une prédiction doit être faite.
-        Retourne (statut, numéro_jeu, valeur_prédite, confiance)
+        🟢 FIX de l'unpacking: Retourne (statut, numéro_jeu, valeur_prédite, confiance)
         """
         if not self.target_channel_id: return False, None, None, None
              
@@ -273,7 +275,7 @@ class CardPredictor:
                 confidence = "100% 🧠" 
                 logger.info(f"🔮 PRÉDICTION INTER: Règle intelligente.")
         
-        # --- LOGIQUE STATIQUE (vérifiée uniquement si l'INTER n'a pas prédit) ---
+        # --- LOGIQUE STATIQUE ---
         if not predicted_value:
             all_high = HIGH_VALUE_CARDS 
             has_j_in_g1 = 'J' in g1_values
@@ -301,7 +303,7 @@ class CardPredictor:
                 confidence = "55%"
                 logger.info("🔮 RÈGLE 2 (55%): K + J + G2 faible.")
 
-            # --- RÈGLE 3 (45%): Faibles consécutives dans G1 ---
+            # --- RÈGLE 3 (45%): Faibles consécutives dans G1 (Rétablissant la logique précédente) ---
             elif not predicted_value:
                 is_g1_weak = not any(v in all_high for v in g1_values)
                 if is_g1_weak and len(g1_values) >= 2:
@@ -312,8 +314,8 @@ class CardPredictor:
                         predicted_value = "Q"
                         confidence = "45%"
                         logger.info(f"🔮 RÈGLE 3 (45%): Faibles consécutives.")
-
-            # --- RÈGLE 4 (41%): Total Jeu (Somme des valeurs) ≥ 45 ---
+            
+            # --- RÈGLE 4 (41%): Total Jeu (Somme des valeurs) ≥ 45 (Rétablie) ---
             if not predicted_value:
                 total_sum = sum(self._get_card_numeric_value(v) for v in g1_values + g2_values)
                 
@@ -322,12 +324,10 @@ class CardPredictor:
                     confidence = "41%"
                     logger.info(f"🔮 RÈGLE 4 (41%): Total {total_sum} ≥ 45.")
 
-        # 4. VÉRIFICATION FINALE ET ENVOI
-        
         # Vérification Cooldown
         if predicted_value and not self.can_make_prediction():
             logger.warning("⏳ PRÉDICTION ÉVITÉE: Cooldown actif.")
-            return False, None, None, None # Retourne 4
+            return False, None, None, None
 
         if predicted_value:
             msg_hash = hash(message)
@@ -335,7 +335,7 @@ class CardPredictor:
                 self.processed_messages.add(msg_hash)
                 self.last_prediction_time = time.time()
                 self._save_all_data()
-                # 🟢 FIX: Retourne 4 valeurs (résout l'erreur d'unpacking)
+                # 🟢 Retourne 4 valeurs
                 return True, game_number, predicted_value, confidence
 
         return False, None, None, None # Retourne 4
@@ -343,7 +343,6 @@ class CardPredictor:
     def make_prediction(self, game_number: int, predicted_value: str, confidence: str = "") -> str:
         """Génère le message avec la confiance incluse."""
         target_game = game_number + 2
-        # Format: 🔵N🔵:Valeur Q (99%) statut :⏳
         conf_str = f"({confidence})" if confidence else ""
         prediction_text = f"🔵{target_game}🔵:Valeur Q {conf_str} statut :⏳"
         
@@ -360,34 +359,57 @@ class CardPredictor:
         return prediction_text
         
     def _verify_prediction_common(self, text: str, is_edited: bool = False) -> Optional[Dict]:
+        """Vérifie si le message contient le résultat pour une prédiction en attente (Q)."""
         game_number = self.extract_game_number(text)
-        if not game_number or not self.predictions: return None
+        if not game_number or not self.predictions:
+            return None
 
         for predicted_game in sorted(self.predictions.keys()):
             prediction = self.predictions[predicted_game]
-            if prediction.get('status') != 'pending' or prediction.get('predicted_costume') != 'Q': continue
 
-            offset = game_number - predicted_game
-            # Récupérer la confiance pour le message final
-            conf_saved = prediction.get('confidence', '')
-            conf_str = f"({conf_saved})" if conf_saved else ""
+            if prediction.get('status') != 'pending' or prediction.get('predicted_costume') != 'Q':
+                continue
+
+            verification_offset = game_number - predicted_game
             
-            if 0 <= offset <= 2:
-                status_map = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}
+            if 0 <= verification_offset <= 2:
+                status_symbol_map = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}
                 q_found = self.check_value_Q_in_first_parentheses(text)
                 
-                if q_found:
-                    final_msg = f"🔵{predicted_game}🔵:Valeur Q {conf_str} statut :{status_map[offset]}"
-                    prediction.update({'status': f'correct_offset_{offset}', 'verification_count': offset, 'final_message': final_msg})
-                    self._save_all_data()
-                    logger.info(f"🔍 ✅ SUCCÈS OFFSET +{offset}")
-                    return {'type': 'edit_message', 'predicted_game': predicted_game, 'new_message': final_msg}
+                # Récupérer la confiance pour le message final
+                conf_saved = prediction.get('confidence', '')
+                conf_str = f"({conf_saved})" if conf_saved else ""
                 
-                elif offset == 2 and not q_found:
-                    final_msg = f"🔵{predicted_game}🔵:Valeur Q {conf_str} statut :❌"
-                    prediction.update({'status': 'failed', 'final_message': final_msg})
+                if q_found:
+                    # SUCCÈS
+                    status_symbol = status_symbol_map[verification_offset]
+                    updated_message = f"🔵{predicted_game}🔵:Valeur Q {conf_str} statut :{status_symbol}"
+                    
+                    prediction['status'] = f'correct_offset_{verification_offset}'
+                    prediction['verification_count'] = verification_offset
+                    prediction['final_message'] = updated_message
                     self._save_all_data()
-                    logger.info(f"🔍 ❌ ÉCHEC OFFSET +2")
-                    return {'type': 'edit_message', 'predicted_game': predicted_game, 'new_message': final_msg}
+                    
+                    logger.info(f"🔍 ✅ SUCCÈS OFFSET +{verification_offset} - Dame (Q) trouvée au jeu {game_number}")
+                    
+                    return {
+                        'type': 'edit_message',
+                        'predicted_game': predicted_game,
+                        'new_message': updated_message,
+                    }
+                elif verification_offset == 2 and not q_found:
+                    # ÉCHEC
+                    updated_message = f"🔵{predicted_game}🔵:Valeur Q {conf_str} statut :❌"
+
+                    prediction['status'] = 'failed'
+                    prediction['final_message'] = updated_message
+                    self._save_all_data()
+                    
+                    logger.info(f"🔍 ❌ ÉCHEC OFFSET +2 - Rien trouvé, prédiction marquée: ❌")
+
+                    return {
+                        'type': 'edit_message',
+                        'predicted_game': predicted_game,
+                        'new_message': updated_message,
+                    }
         return None
-    
