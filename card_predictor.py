@@ -143,7 +143,6 @@ class CardPredictor:
                 return None
         return None
 
-    # --- [NOUVEAU] Extraction du Score Total pour règle #T ---
     def extract_total_score(self, message: str) -> Optional[int]:
         """Extrait le score total du message (format #T45 ou #T36)."""
         match = re.search(r'#T(\d+)', message, re.IGNORECASE)
@@ -352,7 +351,6 @@ class CardPredictor:
         """
         return '✅' in message or '🔰' in message
     # ----------------------------
-
     def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str]]:
         """Détermine si une prédiction doit être faite."""
         if not self.target_channel_id:
@@ -430,7 +428,8 @@ class CardPredictor:
                 elif not predicted_value and self.inter_data:
                     # Trouver le dernier jeu où Q est apparue (basé sur inter_data qui stocke les succès)
                     last_q_entry = max(self.inter_data, key=lambda x: x['numero_resultat'], default=None)
-                                  if last_q_entry:
+                    
+                    if last_q_entry:
                         last_q_game_number = last_q_entry['numero_resultat']
                         gap = game_number - last_q_game_number
                         
@@ -579,3 +578,4 @@ class CardPredictor:
                         'new_message': updated_message,
                     }
         return None
+        
