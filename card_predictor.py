@@ -1,8 +1,11 @@
 # card_predictor.py
 
 """
-Card prediction logic for Joker's Telegram Bot - simplified for webhook deployment
-Version finale: Correction de la SyntaxError et réintégration du retour à 4 valeurs avec confiance.
+Card prediction logic for Joker's Telegram Bot.
+Version finale garantissant l'envoi :
+1. Correction de la 'SyntaxError' dans la logique de nettoyage.
+2. Correction de la 'Unpacking Error' en assurant le retour de 4 valeurs (statut, num, val, confiance) dans TOUS les cas.
+3. Activation des règles statiques par défaut si l'INTER mode n'a pas encore de données.
 """
 import re
 import logging
@@ -42,6 +45,7 @@ class CardPredictor:
         self.smart_rules = self._load_data('smart_rules.json') 
         self.prediction_cooldown = 30 
         
+        # Tente d'analyser les règles si l'historique existe mais le mode n'est pas actif.
         if self.inter_data and not self.is_inter_mode_active:
              self.analyze_and_set_smart_rules(initial_load=True)
 
@@ -66,7 +70,7 @@ class CardPredictor:
             if is_scalar: return 0.0
             if filename == 'inter_data.json': return []
             if filename == 'sequential_history.json': return {}
-            if filename == 'smart_rules.json': return [] # Correction pour smart_rules
+            if filename == 'smart_rules.json': return []
             return {}
         except Exception as e:
              logger.error(f"❌ Erreur critique chargement {filename}: {e}")
@@ -181,7 +185,7 @@ class CardPredictor:
                     logger.info(f"💾 INTER: Q à N={game_number} déclenché par N-2={n_minus_2_game}")
         
         obsolete_game_limit = game_number - 50 
-        # 🟢 FIX DE LA SYNTAX ERROR: Remplacer num: entry par num, entry
+        # CORRECTION SYNTAXE: Utilisation de `num, entry` pour le dictionnaire comprehension
         self.sequential_history = {num: entry for num, entry in self.sequential_history.items() if num >= obsolete_game_limit}
 
     def analyze_and_set_smart_rules(self, initial_load: bool = False) -> List[str]:
@@ -240,24 +244,30 @@ class CardPredictor:
     def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str], Optional[str]]:
         """
         Détermine si une prédiction doit être faite.
-        🟢 FIX de l'unpacking: Retourne (statut, numéro_jeu, valeur_prédite, confiance)
+        RETOURNE 4 VALEURS: (statut, numéro_jeu, valeur_prédite, confiance)
         """
-        if not self.target_channel_id: return False, None, None, None
+        if not self.target_channel_id: 
+            return False, None, None, None # Retourne 4
              
         game_number = self.extract_game_number(message)
-        if not game_number: return False, None, None, None
+        if not game_number: 
+            return False, None, None, None # Retourne 4
 
         self.collect_inter_data(game_number, message) 
         
-        if self.has_pending_indicators(message): return False, None, None, None
-        if not self.has_completion_indicators(message): return False, None, None, None
+        if self.has_pending_indicators(message): 
+            return False, None, None, None # Retourne 4
+            
+        if not self.has_completion_indicators(message): 
+            return False, None, None, None # Retourne 4
             
         predicted_value = None
         confidence = None # Variable pour stocker le pourcentage
         
         # Extraction
         g1_content = self.extract_first_parentheses_content(message)
-        if not g1_content: return False, None, None, None
+        if not g1_content: 
+            return False, None, None, None # Retourne 4
         
         g1_details = self.extract_card_details(g1_content)
         g1_values = [v for v, c in g1_details]
@@ -275,7 +285,7 @@ class CardPredictor:
                 confidence = "100% 🧠" 
                 logger.info(f"🔮 PRÉDICTION INTER: Règle intelligente.")
         
-        # --- LOGIQUE STATIQUE ---
+        # --- LOGIQUE STATIQUE (Si pas de prédiction INTER) ---
         if not predicted_value:
             all_high = HIGH_VALUE_CARDS 
             has_j_in_g1 = 'J' in g1_values
@@ -303,7 +313,7 @@ class CardPredictor:
                 confidence = "55%"
                 logger.info("🔮 RÈGLE 2 (55%): K + J + G2 faible.")
 
-            # --- RÈGLE 3 (45%): Faibles consécutives dans G1 (Rétablissant la logique précédente) ---
+            # --- RÈGLE 3 (45%): Faibles consécutives dans G1 ---
             elif not predicted_value:
                 is_g1_weak = not any(v in all_high for v in g1_values)
                 if is_g1_weak and len(g1_values) >= 2:
@@ -315,7 +325,7 @@ class CardPredictor:
                         confidence = "45%"
                         logger.info(f"🔮 RÈGLE 3 (45%): Faibles consécutives.")
             
-            # --- RÈGLE 4 (41%): Total Jeu (Somme des valeurs) ≥ 45 (Rétablie) ---
+            # --- RÈGLE 4 (41%): Total Jeu (Somme des valeurs) ≥ 45 ---
             if not predicted_value:
                 total_sum = sum(self._get_card_numeric_value(v) for v in g1_values + g2_values)
                 
@@ -324,18 +334,19 @@ class CardPredictor:
                     confidence = "41%"
                     logger.info(f"🔮 RÈGLE 4 (41%): Total {total_sum} ≥ 45.")
 
-        # Vérification Cooldown
+        # VÉRIFICATION COOLDOWN
         if predicted_value and not self.can_make_prediction():
             logger.warning("⏳ PRÉDICTION ÉVITÉE: Cooldown actif.")
-            return False, None, None, None
+            return False, None, None, None # Retourne 4
 
+        # ENVOI (Déclenchement du gestionnaire)
         if predicted_value:
             msg_hash = hash(message)
             if msg_hash not in self.processed_messages:
                 self.processed_messages.add(msg_hash)
                 self.last_prediction_time = time.time()
                 self._save_all_data()
-                # 🟢 Retourne 4 valeurs
+                # 🟢 Retourne 4 valeurs : Cela déclenche l'envoi dans le gestionnaire principal
                 return True, game_number, predicted_value, confidence
 
         return False, None, None, None # Retourne 4
