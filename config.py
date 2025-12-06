@@ -9,9 +9,9 @@ import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# --- IDS DE CANAUX PAR DÉFAUT (Supprimés, les vrais IDs sont maintenant dans config.json) ---
-DEFAULT_TARGET_CHANNEL_ID = None 
-DEFAULT_PREDICTION_CHANNEL_ID = None 
+# --- IDS DE CANAUX PRÉ-CONFIGURÉS ---
+DEFAULT_TARGET_CHANNEL_ID = -1003424179389  # Canal source
+DEFAULT_PREDICTION_CHANNEL_ID = -1003362820311  # Canal de prédiction 
 
 # --- CONSTANTES POUR LES CALLBACKS DE CONFIGURATION ---
 CALLBACK_SOURCE = "config_source"

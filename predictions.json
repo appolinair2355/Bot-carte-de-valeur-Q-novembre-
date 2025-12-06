@@ -1,0 +1,19 @@
+{
+    "84": {
+        "predicted_costume": "Q",
+        "status": "correct_offset_1",
+        "predicted_from": 82,
+        "verification_count": 1,
+        "message_text": "\ud83d\udd3584\ud83d\udd35:Valeur Q statut :\u23f3",
+        "message_id": 8175,
+        "final_message": "\ud83d\udd3584\ud83d\udd35:Valeur Q statut :\u27051\ufe0f\u20e3"
+    },
+    "88": {
+        "predicted_costume": "Q",
+        "status": "pending",
+        "predicted_from": 86,
+        "verification_count": 0,
+        "message_text": "\ud83d\udd3588\ud83d\udd35:Valeur Q statut :\u23f3",
+        "message_id": 8177
+    }
+}

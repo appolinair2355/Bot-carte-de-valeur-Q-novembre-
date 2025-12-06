@@ -26,23 +26,32 @@ class CardPredictor:
         self.predictions = self._load_data('predictions.json') 
         self.processed_messages = self._load_data('processed.json', is_set=True) 
         self.last_prediction_time = self._load_data('last_prediction_time.json', is_scalar=True)
-        
-        # Configuration dynamique des canaux
+
+        # Configuration dynamique des canaux avec valeurs par défaut
         self.config_data = self._load_data('channels_config.json')
-        self.target_channel_id = self.config_data.get('target_channel_id', None)
-        self.prediction_channel_id = self.config_data.get('prediction_channel_id', None)
-        
+
+        # Importer les valeurs par défaut depuis config.py
+        from config import DEFAULT_TARGET_CHANNEL_ID, DEFAULT_PREDICTION_CHANNEL_ID
+
+        self.target_channel_id = self.config_data.get('target_channel_id', DEFAULT_TARGET_CHANNEL_ID)
+        self.prediction_channel_id = self.config_data.get('prediction_channel_id', DEFAULT_PREDICTION_CHANNEL_ID)
+
+        # Sauvegarder si les canaux ont été initialisés avec les valeurs par défaut
+        if not self.config_data.get('target_channel_id') or not self.config_data.get('prediction_channel_id'):
+            self._save_channels_config()
+            logger.info(f"✅ Canaux initialisés - Source: {self.target_channel_id}, Prédiction: {self.prediction_channel_id}")
+
         # --- Logique INTER (N-2 -> Q à N) ---
         # Stocke les cartes de tous les jeux, en attendant que Q arrive à N pour relier à N-2
         self.sequential_history: Dict[int, Dict] = self._load_data('sequential_history.json') 
         # Données officielles des déclencheurs
         self.inter_data: List[Dict] = self._load_data('inter_data.json') 
-        
+
         # Statut et Règles
         self.is_inter_mode_active = self._load_data('inter_mode_status.json', is_scalar=True)
         self.smart_rules = self._load_data('smart_rules.json') # Stocke les Top 3 actifs
         self.prediction_cooldown = 30 
-        
+
         if self.inter_data and not self.is_inter_mode_active:
              self.analyze_and_set_smart_rules(initial_load=True) # Analyse à l'initialisation si l'historique existe
 
@@ -58,14 +67,24 @@ class CardPredictor:
                     if filename == 'inter_mode_status.json':
                         return data.get('active', False)
                     return int(data) if isinstance(data, (int, float)) else data
-                
+
                 # Gestion des types
                 if filename == 'inter_data.json': return data
                 if filename == 'sequential_history.json': 
-                    # Convertir les clés string en int si elles représentent le numéro de jeu
-                    return {int(k): v for k, v in data.items()}
+                    # Convertir toutes les clés string en int de manière sécurisée
+                    if isinstance(data, dict):
+                        converted = {}
+                        for k, v in data.items():
+                            try:
+                                # Force la conversion en int
+                                int_key = int(k)
+                                converted[int_key] = v
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"⚠️ Clé invalide dans sequential_history ignorée: {k} - {e}")
+                        return converted
+                    return {}
                 if filename == 'smart_rules.json': return data
-                
+
                 return data
         except (FileNotFoundError, json.JSONDecodeError):
             logger.warning(f"⚠️ Fichier {filename} non trouvé ou vide. Initialisation par défaut.")
@@ -86,9 +105,12 @@ class CardPredictor:
             data_to_save = {'active': self.is_inter_mode_active}
         elif isinstance(data, set):
             data_to_save = list(data)
+        elif filename == 'sequential_history.json' and isinstance(data, dict):
+            # Convertir les clés int en str pour JSON
+            data_to_save = {str(k): v for k, v in data.items()}
         else:
             data_to_save = data
-            
+
         try:
             with open(filename, 'w') as f:
                 json.dump(data_to_save, f, indent=4)
@@ -121,21 +143,21 @@ class CardPredictor:
             logger.info(f"💾 Canal PRÉDICTION mis à jour: {channel_id}")
         else:
             return False
-            
+
         self._save_channels_config()
         return True
 
     # --- Logique d'Extraction (Mise à jour pour #N et #n) ---
     def extract_game_number(self, message: str) -> Optional[int]:
         """Extrait le numéro du jeu, reconnaissant #N et #n."""
-        
+
         # Recherche #N ou #n en ignorant la casse (re.IGNORECASE)
         match = re.search(r'#N(\d+)\.', message, re.IGNORECASE) 
-        
+
         if not match:
             # Recherche le format de prédiction (🔵N🔵)
             match = re.search(r'🔵(\d+)🔵', message)
-            
+
         if match:
             try:
                 return int(match.group(1))
@@ -183,14 +205,14 @@ class CardPredictor:
         first_parentheses_content = self.extract_first_parentheses_content(message)
         if not first_parentheses_content:
             return None
-            
+
         card_details = self.extract_card_details(first_parentheses_content)
-        
+
         for value, costume in card_details:
             if value == "Q":
                 logger.info(f"🔍 Détection Q: Dame (Q) trouvée dans le premier groupe: {value}{costume}")
                 return (value, costume)
-                
+
         return None
 
     # --- Logique INTER (Mode Intelligent) - MISE À JOUR AVEC ANTI-DOUBLON ---
@@ -207,26 +229,26 @@ class CardPredictor:
                 'cartes': first_two_cards,
                 'date': datetime.now().isoformat()
             }
-        
+
         # 2. VÉRIFIER SI CE JEU (N) EST LE RÉSULTAT (Dame Q)
         q_card_details = self.check_value_Q_in_first_parentheses(message)
-        
+
         if q_card_details:
             # Si Dame Q trouvée à N, le déclencheur est N-2
             n_minus_2_game = game_number - 2
-            
+
             # 3. CHERCHER LE DÉCLENCHEUR (N-2) DANS L'HISTORIQUE EN ATTENTE
             trigger_entry = self.sequential_history.get(n_minus_2_game)
-            
+
             if trigger_entry:
                 trigger_cards = trigger_entry['cartes']
-                
+
                 # --- VÉRIFICATION ANTI-DOUBLON ---
                 is_duplicate = any(
                     entry.get('numero_resultat') == game_number 
                     for entry in self.inter_data
                 )
-                
+
                 if is_duplicate:
                     # logger.warning(f"❌ INTER Data Ignoré: Doublon détecté pour le numéro de résultat N={game_number}. Non ajouté à l'historique INTER.")
                     return # Arrête le processus pour éviter l'enregistrement en double
@@ -242,7 +264,7 @@ class CardPredictor:
                 self.inter_data.append(new_entry)
                 self._save_all_data() 
                 logger.info(f"💾 INTER Data Saved: Q à N={game_number} déclenché par N-2={n_minus_2_game} ({trigger_cards})")
-        
+
         # 4. NETTOYAGE: Supprimer les entrées très anciennes (par exemple, plus de 50 jeux avant)
         obsolete_game_limit = game_number - 50 
         self.sequential_history = {
@@ -263,29 +285,35 @@ class CardPredictor:
             reverse=True
         )
 
-        top_3 = [
+        # Filtrer pour ne garder que les déclencheurs avec au moins 3 occurrences
+        filtered_declencheurs = [
             {'cards': list(declencheur), 'count': count} 
-            for declencheur, count in sorted_declencheurs[:3]
+            for declencheur, count in sorted_declencheurs if count >= 3
         ]
+
+        # Prendre les 3 premiers (ou moins si pas assez de données)
+        top_3 = filtered_declencheurs[:3]
         self.smart_rules = top_3
-        
-        # Activer le mode si des règles sont trouvées ou s'il s'agit d'un chargement initial
+
+        # Activer le mode UNIQUEMENT si des règles valides existent (au moins 3 occurrences)
         if top_3:
             self.is_inter_mode_active = True
-        elif not initial_load:
-            self.is_inter_mode_active = False 
+            logger.info(f"✅ Mode INTER activé avec {len(top_3)} règle(s) intelligente(s)")
+        else:
+            self.is_inter_mode_active = False
+            logger.warning(f"⚠️ Mode INTER désactivé - Pas assez de déclencheurs (min 3 occurrences requises)")
 
         # Sauvegarder le statut et les règles
         self._save_data(self.is_inter_mode_active, 'inter_mode_status.json')
         self._save_data(self.smart_rules, 'smart_rules.json')
-            
+
         return [f"{cards['cards'][0]} {cards['cards'][1]} (x{cards['count']})" for cards in top_3]
 
     def get_inter_status(self) -> Tuple[str, Optional[Dict]]:
         """Génère le statut pour la commande /inter avec l'historique et les boutons."""
         status_lines = ["**📋 HISTORIQUE D'APPRENTISSAGE INTER 🧠**\n"]
         total_collected = len(self.inter_data) 
-        
+
         status_lines.append(f"**Mode Intelligent Actif:** {'✅ OUI' if self.is_inter_mode_active else '❌ NON'}")
         status_lines.append(f"**Historique Q collecté:** **{total_collected} entrées.**\n")
 
@@ -303,7 +331,7 @@ class CardPredictor:
              status_lines.append("\n*Aucun historique de Dame (Q) collecté. Le bot ne peut pas créer de règles intelligentes.*")
 
         status_lines.append("\n---\n")
-        
+
         # Afficher les règles actuelles si actives
         if self.is_inter_mode_active and self.smart_rules:
             status_lines.append("**🎯 Règles Actives (Top 3 Déclencheurs):**")
@@ -344,7 +372,7 @@ class CardPredictor:
         Si l'un d'eux est présent, le message est en attente.
         """
         return '🕐' in message or '⏰' in message
-        
+
     def has_completion_indicators(self, message: str) -> bool:
         """
         Vérifie la présence des indicateurs de succès explicites (✅ ou 🔰).
@@ -355,7 +383,7 @@ class CardPredictor:
         """Détermine si une prédiction doit être faite."""
         if not self.target_channel_id:
              return False, None, None
-             
+
         game_number = self.extract_game_number(message)
         if not game_number:
             return False, None, None
@@ -363,56 +391,59 @@ class CardPredictor:
         # --- ÉTAPE CRITIQUE: Collecte de données pour INTER ---
         self.collect_inter_data(game_number, message) 
         # ----------------------------------------------------
-        
+
         # 1. BLOCAGE IMMEDIAT si le message est en attente (🕐/⏰)
         if self.has_pending_indicators(message):
             return False, None, None 
-        
+
         # 2. VÉRIFICATION STRICTE DE FINALISATION (Doit avoir ✅ ou 🔰)
         if not self.has_completion_indicators(message):
             logger.info("❌ PRÉDICTION BLOQUÉE: Message stable, mais sans indicateur de succès explicite (✅/🔰).")
             return False, None, None
-            
+
         predicted_value = None
         first_group_content = self.extract_first_parentheses_content(message)
 
         if first_group_content:
             card_details = self.extract_card_details(first_group_content)
             card_values = [v for v, c in card_details]
-            
+
             # Extraction du second groupe pour les règles statiques 2 et 3
             second_parentheses_pattern = r'\(([^)]*)\)'
             all_matches = re.findall(second_parentheses_pattern, message)
             second_group_content = all_matches[1] if len(all_matches) > 1 else ""
             second_group_details = self.extract_card_details(second_group_content)
             second_group_values = [v for v, c in second_group_details]
-            
-            
+
+
             # --- LOGIQUE DE PRÉDICTION ---
-            
-            # 1. LOGIQUE INTER (PRIORITÉ)
+
+            # 1. LOGIQUE INTER (PRIORITÉ) - Vérifier que les déclencheurs ont au moins 3 occurrences
             if self.is_inter_mode_active and self.smart_rules:
                 current_trigger_cards = self.get_first_two_cards(first_group_content)
                 current_trigger_tuple = tuple(current_trigger_cards)
-                
-                if any(tuple(rule['cards']) == current_trigger_tuple for rule in self.smart_rules):
-                    predicted_value = "Q"
-                    logger.info(f"🔮 PRÉDICTION INTER: Déclencheur {current_trigger_cards} trouvé dans les règles intelligentes.")
-            
-            
-            # 2. LOGIQUE STATIQUE (SEULEMENT SI INTER N'A PAS DÉJÀ PRÉDIT)
-            if not predicted_value:
+
+                # Vérifier si le déclencheur correspond ET a au moins 3 occurrences
+                for rule in self.smart_rules:
+                    if tuple(rule['cards']) == current_trigger_tuple and rule['count'] >= 3:
+                        predicted_value = "Q"
+                        logger.info(f"🔮 PRÉDICTION INTER: Déclencheur {current_trigger_cards} trouvé (x{rule['count']}).")
+                        break
+
+            # 2. LOGIQUE STATIQUE (SEULEMENT SI INTER N'EST PAS ACTIF)
+            # Si le mode INTER est actif, on ignore complètement les règles statiques
+            if not predicted_value and not self.is_inter_mode_active:
                 # Cartes fortes (A, K, Q, J)
                 all_high_cards = HIGH_VALUE_CARDS
-                
-                # --- [NOUVEAU] RÈGLE STATIQUE : 10 de Cœur (10❤️ ou 10♥️) ---
+
+                # --- [NOUVEAU] RÈGLE STATIQUE : 10 de Cœur (10♥️ ou 10♥️) ---
                 has_10_heart = False
                 for v, c in card_details:
                     # Le symbole est déjà normalisé en ♥️ par extract_card_details
                     if v == '10' and c == '♥️':
                         has_10_heart = True
                         break
-                
+
                 if has_10_heart:
                     predicted_value = "Q"
                     logger.info("🔮 PRÉDICTION STATIQUE: 10 de Cœur détecté.")
@@ -424,19 +455,22 @@ class CardPredictor:
                         predicted_value = "Q"
                         logger.info(f"🔮 PRÉDICTION STATIQUE: Score Total élevé détecté (#T{total_score} >= 45).")
 
-                # --- [NOUVEAU] RÈGLE STATIQUE: Absence de Q consécutive (Gap >= 4) ---
+                # --- RÈGLE STATIQUE: Absence de Q consécutive (Gap >= 4) ---
                 elif not predicted_value and self.inter_data:
                     # Trouver le dernier jeu où Q est apparue (basé sur inter_data qui stocke les succès)
                     last_q_entry = max(self.inter_data, key=lambda x: x['numero_resultat'], default=None)
-                    
+
                     if last_q_entry:
-                        last_q_game_number = last_q_entry['numero_resultat']
-                        gap = game_number - last_q_game_number
-                        
-                        # Si Q est absent depuis 4 numéros (donc on est au 4ème sans Q ou plus)
-                        if gap >= 4:
-                            predicted_value = "Q"
-                            logger.info(f"🔮 PRÉDICTION STATIQUE: Absence de Q détectée depuis {gap} jeux (Dernier Q au {last_q_game_number}).")
+                        try:
+                            last_q_game_number = int(last_q_entry['numero_resultat'])
+                            gap = game_number - last_q_game_number
+
+                            # Si Q est absent depuis 4 numéros (donc on est au 4ème sans Q ou plus)
+                            if gap >= 4:
+                                predicted_value = "Q"
+                                logger.info(f"🔮 PRÉDICTION STATIQUE: Absence de Q détectée depuis {gap} jeux (Dernier Q au {last_q_game_number}).")
+                        except (ValueError, TypeError) as e:
+                            logger.error(f"❌ Erreur conversion numero_resultat: {e}")
 
                 # Règle Statique 1: Deux Valets (J)
                 elif not predicted_value and card_values.count('J') >= 2:
@@ -446,7 +480,7 @@ class CardPredictor:
                 # Règle Statique 2: Un Valet (J) + pas de carte forte dans le 2e groupe
                 elif not predicted_value and card_values.count('J') == 1:
                     has_high_value_in_second = any(v in all_high_cards for v in second_group_values)
-                    
+
                     if not has_high_value_in_second:
                         predicted_value = "Q"
                         logger.info("🔮 PRÉDICTION STATIQUE 2: Un Valet (J) sans carte forte dans le 2e groupe.")
@@ -455,12 +489,12 @@ class CardPredictor:
                 # -----------------------------------------------------------
                 # NOUVELLE RÈGLE STATIQUE 3: G1 (K+J) ET G2 (Faible)
                 # -----------------------------------------------------------
-                
+
                 # Condition G1: Contient K ET J (Combinaison)
                 elif not predicted_value:
                     has_k_in_g1 = 'K' in card_values
                     has_j_in_g1 = 'J' in card_values
-                    
+
                     # Condition G2: AUCUNE carte de haute valeur (A, K, Q, J)
                     is_g2_weak = not any(v in all_high_cards for v in second_group_values)
 
@@ -474,24 +508,55 @@ class CardPredictor:
                 elif not predicted_value:
                     # Les cartes fortes pour cette règle sont: A, K, Q, J
                     is_current_g1_weak = not any(v in all_high_cards for v in card_values)
-                    
+
                     if is_current_g1_weak:
-                        # Vérifier l'historique du jeu précédent (N-1)
-                        previous_game_number = game_number - 1
-                        previous_entry = self.sequential_history.get(previous_game_number)
+                        try:
+                            # Vérifier l'historique du jeu précédent (N-1)
+                            previous_game_number = int(game_number) - 1
+                            previous_entry = self.sequential_history.get(previous_game_number)
+                        except (ValueError, TypeError):
+                            previous_entry = None
 
                         if previous_entry:
                             # Le sequential_history stocke les deux premières cartes du premier groupe.
                             previous_cards = previous_entry['cartes'] 
-                            
+
                             # Extraire les valeurs (ex: '9', '7')
                             previous_values = [re.match(r'(\d+|[AKQJ])', c).group(1) for c in previous_cards if re.match(r'(\d+|[AKQJ])', c)]
-                            
+
                             is_previous_g1_weak = not any(v in all_high_cards for v in previous_values)
-                            
+
                             if is_previous_g1_weak:
                                 predicted_value = "Q"
                                 logger.info(f"🔮 PRÉDICTION STATIQUE 4: G1 faible consécutif détecté (Jeu {previous_game_number} et {game_number}).")
+
+                # --- RÈGLE STATIQUE: Absence de Q dans le premier groupe pendant 5 numéros consécutifs ---
+                elif not predicted_value:
+                    # Compter combien de jeux consécutifs sans Q dans le premier groupe (messages finalisés uniquement)
+                    consecutive_no_q = 0
+
+                    # Parcourir l'historique en ordre inverse pour trouver les jeux précédents
+                    for check_game in range(game_number - 1, max(0, game_number - 6), -1):
+                        history_entry = self.sequential_history.get(check_game)
+
+                        if not history_entry:
+                            # Si on n'a pas l'historique, on arrête le comptage
+                            break
+
+                        # Vérifier si Q est présente dans le premier groupe (les 2 premières cartes)
+                        cards = history_entry.get('cartes', [])
+                        has_q_in_first_group = any('Q' in card for card in cards)
+
+                        if has_q_in_first_group:
+                            # Si Q est trouvée, on arrête le comptage
+                            break
+                        else:
+                            consecutive_no_q += 1
+
+                    # Si Q est absente depuis 5 numéros consécutifs, on prédit Q
+                    if consecutive_no_q >= 5:
+                        predicted_value = "Q"
+                        logger.info(f"🔮 PRÉDICTION STATIQUE: Q absente du premier groupe depuis {consecutive_no_q} jeux consécutifs.")
 
         # ... (Fin de should_predict)
 
@@ -508,7 +573,7 @@ class CardPredictor:
                 return True, game_number, predicted_value
 
         return False, None, None
-        
+
     def make_prediction(self, game_number: int, predicted_value: str) -> str:
         """Génère le message de prédiction et l'enregistre."""
         target_game = game_number + 2
@@ -524,7 +589,7 @@ class CardPredictor:
         }
         self._save_all_data()
         return prediction_text
-        
+
     def _verify_prediction_common(self, text: str, is_edited: bool = False) -> Optional[Dict]:
         """Vérifie si le message contient le résultat pour une prédiction en attente (Q)."""
         game_number = self.extract_game_number(text)
@@ -539,24 +604,24 @@ class CardPredictor:
                 continue
 
             verification_offset = game_number - predicted_game
-            
+
             # Vérification pour N, N+1, N+2 par rapport à la prédiction
             if 0 <= verification_offset <= 2:
                 status_symbol_map = {0: "✅0️⃣", 1: "✅1️⃣", 2: "✅2️⃣"}
                 q_found = self.check_value_Q_in_first_parentheses(text)
-                
+
                 if q_found:
                     # SUCCÈS - Dame (Q) trouvée
                     status_symbol = status_symbol_map[verification_offset]
                     updated_message = f"🔵{predicted_game}🔵:Valeur Q statut :{status_symbol}"
-                    
+
                     prediction['status'] = f'correct_offset_{verification_offset}'
                     prediction['verification_count'] = verification_offset
                     prediction['final_message'] = updated_message
                     self._save_all_data()
-                    
+
                     logger.info(f"🔍 ✅ SUCCÈS OFFSET +{verification_offset} - Dame (Q) trouvée au jeu {game_number}")
-                    
+
                     return {
                         'type': 'edit_message',
                         'predicted_game': predicted_game,
@@ -569,7 +634,7 @@ class CardPredictor:
                     prediction['status'] = 'failed'
                     prediction['final_message'] = updated_message
                     self._save_all_data()
-                    
+
                     logger.info(f"🔍 ❌ ÉCHEC OFFSET +2 - Rien trouvé, prédiction marquée: ❌")
 
                     return {
@@ -578,4 +643,3 @@ class CardPredictor:
                         'new_message': updated_message,
                     }
         return None
-        
