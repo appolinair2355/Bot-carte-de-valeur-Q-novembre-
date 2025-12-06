@@ -642,4 +642,41 @@ class CardPredictor:
                         'predicted_game': predicted_game,
                         'new_message': updated_message,
                     }
+                        # --- NOUVELLE MÉTHODE DE RESET QUOTIDIEN ---
+    def daily_reset_all_data(self):
+        """
+        Réinitialise les données du bot à zéro en vidant tous les fichiers JSON critiques.
+        Cette fonction est appelée par APScheduler depuis main.py à 00h59 heure du Bénin.
+        """
+        logger.warning("🚨 RESET QUOTIDIEN EN COURS : VIDAGE DES DONNÉES JSON.")
+        
+        # Définition des fichiers à vider et de leur contenu initial (vide)
+        files_to_reset = {
+            'predictions.json': {},  # Dictionnaire vide
+            'processed.json': [],    # Liste vide ou {} selon votre implémentation
+            'inter_data.json': [],   # Liste vide pour l'historique INTER
+            'smart_rules.json': [],  # Liste vide pour les règles INTER
+            'sequential_history.json': {} # Dictionnaire vide pour l'historique séquentiel
+        }
+
+        # Vidage des fichiers
+        for filename, empty_data in files_to_reset.items():
+            try:
+                # Écriture de la structure vide dans le fichier JSON
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(empty_data, f, indent=4)
+                logger.info(f"✅ Fichier réinitialisé: {filename}")
+            except Exception as e:
+                logger.error(f"❌ Erreur lors du reset de {filename}: {e}")
+
+        # Réinitialisation des attributs de l'instance CardPredictor en mémoire
+        self.predictions = {}
+        self.processed_messages = set() 
+        self.inter_data = []
+        self.smart_rules = []
+        self.sequential_history = {}
+        
+        logger.info("✅ RESET QUOTIDIEN TERMINÉ. Les collectes et prédictions reprennent à zéro.")
+
         return None
+        
