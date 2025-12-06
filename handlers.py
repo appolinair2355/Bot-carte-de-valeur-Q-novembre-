@@ -15,6 +15,13 @@ import shutil
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# --- CONSTANTES AJOUTÉES/ASSUMÉES POUR LE FICHIER JSON ---
+# Ceci est nécessaire car cette constante est utilisée par les fonctions de chargement/sauvegarde
+LAST_PREDICTION_TIME_FILE = 'last_prediction_time.json'
+INTER_MODE_STATUS_FILE = 'inter_mode_status.json'
+# --- FIN CONSTANTES ---
+
+
 # Importation de CardPredictor (Assurez-vous que card_predictor.py existe et est accessible)
 try:
     from card_predictor import CardPredictor
@@ -68,6 +75,49 @@ CALLBACK_CANCEL = "config_cancel"
 # --- CONSTANTES POUR LES CALLBACKS INTER ---
 CALLBACK_INTER_APPLY = "inter_apply"
 CALLBACK_INTER_DEFAULT = "inter_default"
+
+
+# --- FONCTIONS UTILITAIRES (AJOUTÉES/ASSUMÉES POUR UNE CORRECTION COMPLÈTE) ---
+
+def load_json_file(filename: str, default_value: Any = None) -> Any:
+    """Charge les données d'un fichier JSON."""
+    if not os.path.exists(filename):
+        return default_value if default_value is not None else {}
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Erreur de lecture du fichier JSON {filename}: {e}")
+        return default_value if default_value is not None else {}
+
+def save_json_file(filename: str, data: Any) -> None:
+    """Sauvegarde les données dans un fichier JSON."""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        logger.error(f"Erreur d'écriture dans le fichier JSON {filename}: {e}")
+
+# FIX DE L'ERREUR DE TYPE (int/str) APPLIQUÉ ICI :
+def load_last_prediction_time() -> float:
+    """Charge le temps de la dernière prédiction et s'assure qu'il est un float."""
+    # Assumant que last_prediction_time.json contient {"last_time": <value>}
+    data = load_json_file(LAST_PREDICTION_TIME_FILE)
+    last_time_value = data.get("last_time", 0) # La valeur lue peut être 'str' ou 'int' ou 'float'
+    
+    try:
+        # Conversion explicite en float pour éviter l'erreur de type dans la soustraction
+        return float(last_time_value)
+    except (TypeError, ValueError):
+        logger.warning(f"⚠️ Valeur de temps invalide trouvée ('{last_time_value}'). Réinitialisation à 0.0.")
+        return 0.0
+
+def save_last_prediction_time(last_time: float) -> None:
+    """Sauvegarde le temps de la dernière prédiction."""
+    data = {"last_time": float(last_time)} 
+    save_json_file(LAST_PREDICTION_TIME_FILE, data)
+
+# --- FIN FONCTIONS UTILITAIRES ---
 
 
 # Fonction utilitaire pour l'Inline Keyboard de configuration
@@ -294,7 +344,7 @@ class TelegramHandlers:
                 "   - `WEBHOOK_URL`: URL de votre app Render\n"
                 "   - `PORT`: 10000\n"
                 "5. Déployez!\n\n"
-                "⚙️ Le port 10000 est préconfigué dans render.yaml"
+                "⚙️ Le port 10000 est préconfiguré dans render.yaml"
             )
             self.send_message(chat_id, instructions)
             
@@ -433,8 +483,9 @@ class TelegramHandlers:
             if hasattr(self.card_predictor, 'is_inter_mode_active'):
                 self.card_predictor.is_inter_mode_active = False
             # Sauvegarde uniquement le statut (les règles restent en mémoire mais sont ignorées)
+            # NOTE: self.card_predictor._save_data() doit être défini dans card_predictor.py et utiliser la méthode save_json_file
             if hasattr(self.card_predictor, '_save_data'):
-                 self.card_predictor._save_data(self.card_predictor.is_inter_mode_active, 'inter_mode_status.json')
+                 self.card_predictor._save_data(self.card_predictor.is_inter_mode_active, INTER_MODE_STATUS_FILE)
 
             message = "**❌ RÈGLE PAR DÉFAUT APPLIQUÉE!**\n\nLe bot utilise uniquement la logique statique (ex: Valets J) pour la prédiction."
             self._answer_callback(callback_id, "Mode Défaut activé.")
