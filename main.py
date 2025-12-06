@@ -5,6 +5,7 @@ Main entry point for the Telegram bot deployment on render.com
 """
 import os
 import logging
+import json
 from flask import Flask, request, jsonify
 import requests
 
@@ -12,12 +13,19 @@ import requests
 from config import Config
 from bot import TelegramBot 
 
+# --- IMPORTATION POUR LA PLANIFICATION ---
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz # Pour gérer les fuseaux horaires
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Définir le fuseau horaire du Bénin (UTC+1)
+BENIN_TIMEZONE = pytz.timezone('Africa/Porto-Novo')
 
 # Initialize bot and config
 try:
@@ -84,12 +92,40 @@ def setup_webhook():
     except Exception as e:
         logger.error(f"❌ Erreur critique lors du setup du webhook: {e}")
 
+# --- LOGIQUE DE PLANIFICATION QUOTIDIENNE ---
+
+def start_scheduler():
+    """Démarre l'ordonnanceur pour la tâche quotidienne de réinitialisation."""
+    scheduler = BackgroundScheduler(timezone=BENIN_TIMEZONE)
+    
+    # Récupérer l'instance de CardPredictor
+    card_predictor = bot.handlers.card_predictor
+    
+    if card_predictor:
+        # Tâche : Appeler daily_reset_all_data à 00h59 (heure du Bénin)
+        scheduler.add_job(
+            card_predictor.daily_reset_all_data, 
+            'cron', 
+            hour=0, 
+            minute=59, 
+            id='daily_reset_job',
+            misfire_grace_time=600 # Permet une exécution jusqu'à 10 min de retard
+        )
+        logger.info("⏱️ Tâche de reset quotidien programmée pour 00h59 (heure du Bénin).")
+        scheduler.start()
+    else:
+        logger.error("❌ Impossible de démarrer le scheduler : CardPredictor non initialisé.")
+
+# --- DÉMARRAGE DU PROGRAMME PRINCIPAL ---
+
 if __name__ == '__main__':
-    # Set up webhook on startup
+    # 1. Configurer le Webhook
     setup_webhook()
 
-    # Get port from environment 
+    # 2. Démarrer le Scheduler (planification)
+    start_scheduler()
+    
+    # 3. Démarrer le serveur Flask
     port = config.PORT
-
-    # Run the Flask app
-    app.run(host='0.0.0.0', port=port, debug=config.DEBUG)
+    logger.info(f"🚀 Serveur Flask démarré sur le port {port}")
+    app.run(host='0.0.0.0', port=port)
